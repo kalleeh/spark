@@ -1,0 +1,15 @@
+[package]
+name = "spark-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop target for the Spark fantasy console"
+
+[[bin]]
+name = "spark"
+path = "src/main.rs"
+
+[dependencies]
+macroquad = { version = "0.4", features = ["audio"] }
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+png = "0.17"
+spark-core = { path = "../spark-core", features = ["std"] }

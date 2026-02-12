@@ -1,0 +1,12 @@
+[package]
+name = "spark-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared no_std core library for the Spark fantasy console"
+
+[dependencies]
+libm = "0.2"
+
+[features]
+default = ["std"]
+std = []

@@ -1,0 +1,10 @@
+[workspace]
+members = ["spark-core", "spark-desktop", "spark-pico"]
+default-members = ["spark-core", "spark-desktop"]
+resolver = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = "symbols"
