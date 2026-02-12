@@ -1,2 +1,3 @@
-[build]
-target = "thumbv8m.main-none-eabihf"
+# Default target only applies when building spark-pico explicitly.
+# Desktop builds use the host target automatically.
+# To build for RP2350: cargo build -p spark-pico --target thumbv8m.main-none-eabihf
