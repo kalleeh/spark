@@ -1,5 +1,5 @@
 use macroquad::prelude::*;
-use spark_core::audio::{Sfx, MusicPattern, NUM_SFX, NUM_MUSIC, NOTES_PER_SFX};
+use spark_core::audio::{MusicPattern, Sfx, NOTES_PER_SFX, NUM_MUSIC, NUM_SFX};
 use spark_core::console::Console;
 
 // ---------------------------------------------------------------------------
@@ -373,7 +373,10 @@ fn count_tokens(code: &str) -> usize {
         for tok in &tokens {
             match tok.kind {
                 TokenKind::Comment => {} // free
-                TokenKind::Keyword | TokenKind::ApiFunc | TokenKind::Number | TokenKind::StringLit => {
+                TokenKind::Keyword
+                | TokenKind::ApiFunc
+                | TokenKind::Number
+                | TokenKind::StringLit => {
                     count += 1;
                 }
                 TokenKind::Default => {
@@ -470,12 +473,12 @@ fn ends_with_indent_keyword(line: &str) -> bool {
 /// Token categories for syntax highlighting.
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum TokenKind {
-    Default,  // color 6 (light gray)
-    Comment,  // color 13 (dark gray/blue)
+    Default,   // color 6 (light gray)
+    Comment,   // color 13 (dark gray/blue)
     StringLit, // color 4 (brown)
-    Number,   // color 14 (pink/mauve)
-    Keyword,  // color 12 (light blue)
-    ApiFunc,  // color 9 (orange)
+    Number,    // color 14 (pink/mauve)
+    Keyword,   // color 12 (light blue)
+    ApiFunc,   // color 9 (orange)
 }
 
 /// A span of characters on one line sharing the same highlight color.
@@ -488,20 +491,17 @@ struct Token {
 
 /// Lua keywords recognized by the highlighter.
 const LUA_KEYWORDS: &[&str] = &[
-    "if", "then", "else", "elseif", "end", "for", "while", "do",
-    "repeat", "until", "function", "return", "local", "and", "or",
-    "not", "in", "true", "false", "nil", "break", "goto",
+    "if", "then", "else", "elseif", "end", "for", "while", "do", "repeat", "until", "function",
+    "return", "local", "and", "or", "not", "in", "true", "false", "nil", "break", "goto",
 ];
 
 /// PICO-8 API function names recognized by the highlighter.
 const PICO8_API: &[&str] = &[
-    "cls", "pset", "print", "spr", "map", "sfx", "music", "btn", "btnp",
-    "rnd", "sin", "cos", "atan2", "sqrt", "abs", "flr", "ceil", "min",
-    "max", "mid", "sgn", "band", "bor", "bxor", "bnot", "shl", "shr",
-    "sub", "add", "del", "count", "foreach", "all", "tostr", "tonum",
-    "peek", "poke", "memcpy", "memset", "stat", "camera", "clip", "pal",
-    "palt", "color", "circ", "circfill", "rect", "rectfill", "line",
-    "sget", "sset", "fget", "fset", "mget", "mset", "sspr",
+    "cls", "pset", "print", "spr", "map", "sfx", "music", "btn", "btnp", "rnd", "sin", "cos",
+    "atan2", "sqrt", "abs", "flr", "ceil", "min", "max", "mid", "sgn", "band", "bor", "bxor",
+    "bnot", "shl", "shr", "sub", "add", "del", "count", "foreach", "all", "tostr", "tonum", "peek",
+    "poke", "memcpy", "memset", "stat", "camera", "clip", "pal", "palt", "color", "circ",
+    "circfill", "rect", "rectfill", "line", "sget", "sset", "fget", "fset", "mget", "mset", "sspr",
 ];
 
 /// Return true if `c` can appear in a Lua identifier.
@@ -520,7 +520,11 @@ fn tokenize_line(line: &str) -> Vec<Token> {
     while i < len {
         // --- Comment: -- to end of line ---
         if i + 1 < len && bytes[i] == b'-' && bytes[i + 1] == b'-' {
-            tokens.push(Token { kind: TokenKind::Comment, start: i, end: len });
+            tokens.push(Token {
+                kind: TokenKind::Comment,
+                start: i,
+                end: len,
+            });
             i = len;
             continue;
         }
@@ -539,7 +543,11 @@ fn tokenize_line(line: &str) -> Vec<Token> {
             if i < len {
                 i += 1; // skip closing quote
             }
-            tokens.push(Token { kind: TokenKind::StringLit, start, end: i });
+            tokens.push(Token {
+                kind: TokenKind::StringLit,
+                start,
+                end: i,
+            });
             continue;
         }
 
@@ -548,8 +556,7 @@ fn tokenize_line(line: &str) -> Vec<Token> {
             || (bytes[i] == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit())
         {
             let start = i;
-            if bytes[i] == b'0' && i + 1 < len && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
-            {
+            if bytes[i] == b'0' && i + 1 < len && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
                 // hex number
                 i += 2;
                 while i < len && bytes[i].is_ascii_hexdigit() {
@@ -561,7 +568,11 @@ fn tokenize_line(line: &str) -> Vec<Token> {
                     i += 1;
                 }
             }
-            tokens.push(Token { kind: TokenKind::Number, start, end: i });
+            tokens.push(Token {
+                kind: TokenKind::Number,
+                start,
+                end: i,
+            });
             continue;
         }
 
@@ -579,7 +590,11 @@ fn tokenize_line(line: &str) -> Vec<Token> {
             } else {
                 TokenKind::Default
             };
-            tokens.push(Token { kind, start, end: i });
+            tokens.push(Token {
+                kind,
+                start,
+                end: i,
+            });
             continue;
         }
 
@@ -597,7 +612,11 @@ fn tokenize_line(line: &str) -> Vec<Token> {
         {
             i += 1;
         }
-        tokens.push(Token { kind: TokenKind::Default, start, end: i });
+        tokens.push(Token {
+            kind: TokenKind::Default,
+            start,
+            end: i,
+        });
     }
 
     tokens
@@ -700,8 +719,8 @@ pub struct Editor {
     // Search state
     search_active: bool,
     search_query: String,
-    search_results: Vec<usize>,  // byte offsets of matches
-    search_current: usize,       // index into search_results
+    search_results: Vec<usize>, // byte offsets of matches
+    search_current: usize,      // index into search_results
 
     // Internal clipboard (line-based copy/paste)
     // NOTE: System clipboard integration could be improved by using the `arboard`
@@ -970,7 +989,9 @@ impl Editor {
         }
 
         // Pre-compute selection range if active
-        let sel_range = self.selection_start.map(|ss| selection_range(ss, self.cursor_pos));
+        let sel_range = self
+            .selection_start
+            .map(|ss| selection_range(ss, self.cursor_pos));
 
         // Pre-compute search match info: clone to avoid borrow issues
         let search_active = self.search_active;
@@ -979,7 +1000,11 @@ impl Editor {
         let search_query_len = self.search_query.len();
 
         // Determine how many visible code rows we have (reserve space for search bar)
-        let visible_rows = if search_active { CODE_ROWS.saturating_sub(1) } else { CODE_ROWS };
+        let visible_rows = if search_active {
+            CODE_ROWS.saturating_sub(1)
+        } else {
+            CODE_ROWS
+        };
 
         for i in 0..visible_rows {
             let line_idx = self.scroll_y + i;
@@ -1095,11 +1120,8 @@ impl Editor {
             console.print(&find_label, Some(1), Some(bar_y), Some(7));
 
             if !self.search_results.is_empty() {
-                let count_str = format!(
-                    "{}/{}",
-                    self.search_current + 1,
-                    self.search_results.len()
-                );
+                let count_str =
+                    format!("{}/{}", self.search_current + 1, self.search_results.len());
                 let count_x = SW - count_str.len() as i32 * CHAR_W - 1;
                 console.print(&count_str, Some(count_x), Some(bar_y), Some(11));
             } else if !self.search_query.is_empty() {
@@ -1203,8 +1225,7 @@ impl Editor {
     /// Perform an undo: pop from undo_stack, push current to redo_stack, restore.
     fn perform_undo(&mut self) {
         if let Some((snap_code, snap_cursor)) = self.undo_stack.pop() {
-            self.redo_stack
-                .push((self.code.clone(), self.cursor_pos));
+            self.redo_stack.push((self.code.clone(), self.cursor_pos));
             self.code = snap_code;
             self.cursor_pos = snap_cursor.min(self.code.len());
             self.last_undo_code = self.code.clone();
@@ -1214,8 +1235,7 @@ impl Editor {
     /// Perform a redo: pop from redo_stack, push current to undo_stack, restore.
     fn perform_redo(&mut self) {
         if let Some((snap_code, snap_cursor)) = self.redo_stack.pop() {
-            self.undo_stack
-                .push((self.code.clone(), self.cursor_pos));
+            self.undo_stack.push((self.code.clone(), self.cursor_pos));
             if self.undo_stack.len() > UNDO_MAX {
                 self.undo_stack.remove(0);
             }
@@ -1336,7 +1356,8 @@ impl Editor {
         }
 
         // Enter or Ctrl+G: jump to next match
-        if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter)
+        if is_key_pressed(KeyCode::Enter)
+            || is_key_pressed(KeyCode::KpEnter)
             || (ctrl && is_key_pressed(KeyCode::G))
         {
             if !self.search_results.is_empty() {
@@ -1508,8 +1529,8 @@ impl Editor {
             return;
         }
 
-        let nav_key = (0..NUM_REPEAT_KEYS).any(|i| self.key_fire(i))
-            || is_key_pressed(KeyCode::Escape);
+        let nav_key =
+            (0..NUM_REPEAT_KEYS).any(|i| self.key_fire(i)) || is_key_pressed(KeyCode::Escape);
 
         // --- Navigation keys with Shift selection support ---
         if self.key_fire(K_LEFT) {
@@ -2740,10 +2761,7 @@ mod tests {
     #[test]
     fn zoom_to_sprite_pixel_top_left_corner() {
         // Top-left corner of the zoomed view
-        assert_eq!(
-            zoom_to_sprite_pixel(SPR_ZOOM_X, SPR_ZOOM_Y),
-            Some((0, 0))
-        );
+        assert_eq!(zoom_to_sprite_pixel(SPR_ZOOM_X, SPR_ZOOM_Y), Some((0, 0)));
     }
 
     #[test]
@@ -2843,11 +2861,7 @@ mod tests {
     fn sheet_click_to_sprite_last_valid() {
         // page=12, row=3, col=15 => (12+3)*16 + 15 = 255
         assert_eq!(
-            sheet_click_to_sprite(
-                SHEET_X + 15 * 8,
-                SHEET_Y + 3 * 8,
-                12
-            ),
+            sheet_click_to_sprite(SHEET_X + 15 * 8, SHEET_Y + 3 * 8, 12),
             Some(255)
         );
     }
@@ -2891,13 +2905,19 @@ mod tests {
     #[test]
     fn palette_click_to_color_middle() {
         // color 7 starts at x = 7*8 = 56
-        assert_eq!(palette_click_to_color(7 * PAL_SWATCH + 3, PAL_Y + 2), Some(7));
+        assert_eq!(
+            palette_click_to_color(7 * PAL_SWATCH + 3, PAL_Y + 2),
+            Some(7)
+        );
     }
 
     #[test]
     fn palette_click_to_color_within_swatch() {
         // Inside the last pixel of swatch 0
-        assert_eq!(palette_click_to_color(PAL_SWATCH - 1, PAL_Y + PAL_SWATCH - 1), Some(0));
+        assert_eq!(
+            palette_click_to_color(PAL_SWATCH - 1, PAL_Y + PAL_SWATCH - 1),
+            Some(0)
+        );
     }
 
     #[test]
@@ -2982,10 +3002,7 @@ mod tests {
     #[test]
     fn map_view_to_tile_top_left_no_scroll() {
         // Click at the top-left of the map view with no scroll
-        assert_eq!(
-            map_view_to_tile(MAP_VIEW_X, MAP_VIEW_Y, 0, 0),
-            Some((0, 0))
-        );
+        assert_eq!(map_view_to_tile(MAP_VIEW_X, MAP_VIEW_Y, 0, 0), Some((0, 0)));
     }
 
     #[test]
@@ -3311,7 +3328,10 @@ mod tests {
     fn tokenize_string_with_escape() {
         let tokens = tokenize_line("\"he\\\"llo\"");
         // Should be a single string token
-        let strings: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::StringLit).collect();
+        let strings: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::StringLit)
+            .collect();
         assert_eq!(strings.len(), 1);
     }
 
@@ -3339,14 +3359,20 @@ mod tests {
     #[test]
     fn tokenize_keyword_if() {
         let tokens = tokenize_line("if x then");
-        let kw: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::Keyword).collect();
+        let kw: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Keyword)
+            .collect();
         assert_eq!(kw.len(), 2); // "if" and "then"
     }
 
     #[test]
     fn tokenize_keyword_function() {
         let tokens = tokenize_line("function foo()");
-        let kw: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::Keyword).collect();
+        let kw: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Keyword)
+            .collect();
         assert_eq!(kw.len(), 1);
         assert_eq!(&"function foo()"[kw[0].start..kw[0].end], "function");
     }
@@ -3367,7 +3393,10 @@ mod tests {
     #[test]
     fn tokenize_api_function() {
         let tokens = tokenize_line("cls(1)");
-        let api: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::ApiFunc).collect();
+        let api: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::ApiFunc)
+            .collect();
         assert_eq!(api.len(), 1);
         assert_eq!(&"cls(1)"[api[0].start..api[0].end], "cls");
     }
@@ -3375,7 +3404,10 @@ mod tests {
     #[test]
     fn tokenize_api_pset() {
         let tokens = tokenize_line("pset(10,20,7)");
-        let api: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::ApiFunc).collect();
+        let api: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::ApiFunc)
+            .collect();
         assert_eq!(api.len(), 1);
         assert_eq!(&"pset(10,20,7)"[api[0].start..api[0].end], "pset");
     }
@@ -3415,9 +3447,13 @@ mod tests {
         assert_eq!(tokens[0].start, 0);
         for i in 1..tokens.len() {
             assert_eq!(
-                tokens[i].start, tokens[i - 1].end,
+                tokens[i].start,
+                tokens[i - 1].end,
                 "Gap between token {} and {} at positions {}-{}",
-                i - 1, i, tokens[i - 1].end, tokens[i].start
+                i - 1,
+                i,
+                tokens[i - 1].end,
+                tokens[i].start
             );
         }
         assert_eq!(tokens.last().unwrap().end, line.len());
@@ -3629,7 +3665,10 @@ mod tests {
             assert!(
                 y_higher <= y_lower,
                 "Pitch {} (y={}) should be <= pitch {} (y={})",
-                p, y_higher, p - 1, y_lower
+                p,
+                y_higher,
+                p - 1,
+                y_lower
             );
         }
     }
@@ -3639,7 +3678,12 @@ mod tests {
         for p in 0..64_u8 {
             let y = sfx_pitch_to_y(p);
             assert!(y >= SFX_ROLL_Y, "pitch {} y={} below roll top", p, y);
-            assert!(y < SFX_ROLL_Y + SFX_ROLL_H, "pitch {} y={} above roll bottom", p, y);
+            assert!(
+                y < SFX_ROLL_Y + SFX_ROLL_H,
+                "pitch {} y={} above roll bottom",
+                p,
+                y
+            );
         }
     }
 
@@ -3659,10 +3703,7 @@ mod tests {
 
     #[test]
     fn sfx_click_to_note_bottom_right() {
-        let result = sfx_click_to_note(
-            SFX_ROLL_X + SFX_ROLL_W - 1,
-            SFX_ROLL_Y + SFX_ROLL_H - 1,
-        );
+        let result = sfx_click_to_note(SFX_ROLL_X + SFX_ROLL_W - 1, SFX_ROLL_Y + SFX_ROLL_H - 1);
         assert!(result.is_some());
         let (note_idx, pitch) = result.unwrap();
         assert_eq!(note_idx, 31); // last note column

@@ -14,21 +14,21 @@ pub const MAP_SIZE: usize = MAP_W * MAP_H;
 /// The PICO-8 16-color palette as RGBA bytes.
 pub const PICO8_PALETTE: [[u8; 4]; 16] = [
     [0, 0, 0, 255],       // 0 black
-    [29, 43, 83, 255],     // 1 dark_blue
-    [126, 37, 83, 255],    // 2 dark_purple
-    [0, 135, 81, 255],     // 3 dark_green
-    [171, 82, 54, 255],    // 4 brown
-    [95, 87, 79, 255],     // 5 dark_grey
-    [194, 195, 199, 255],  // 6 light_grey
-    [255, 241, 232, 255],  // 7 white
-    [255, 0, 77, 255],     // 8 red
-    [255, 163, 0, 255],    // 9 orange
-    [255, 236, 39, 255],   // 10 yellow
-    [0, 228, 54, 255],     // 11 green
-    [41, 173, 255, 255],   // 12 blue
-    [131, 118, 156, 255],  // 13 indigo/lavender
-    [255, 119, 168, 255],  // 14 pink
-    [255, 204, 170, 255],  // 15 peach
+    [29, 43, 83, 255],    // 1 dark_blue
+    [126, 37, 83, 255],   // 2 dark_purple
+    [0, 135, 81, 255],    // 3 dark_green
+    [171, 82, 54, 255],   // 4 brown
+    [95, 87, 79, 255],    // 5 dark_grey
+    [194, 195, 199, 255], // 6 light_grey
+    [255, 241, 232, 255], // 7 white
+    [255, 0, 77, 255],    // 8 red
+    [255, 163, 0, 255],   // 9 orange
+    [255, 236, 39, 255],  // 10 yellow
+    [0, 228, 54, 255],    // 11 green
+    [41, 173, 255, 255],  // 12 blue
+    [131, 118, 156, 255], // 13 indigo/lavender
+    [255, 119, 168, 255], // 14 pink
+    [255, 204, 170, 255], // 15 peach
 ];
 
 /// Size of the general-purpose / user data memory region (0x4300-0x5FFF).
@@ -360,9 +360,13 @@ impl Console {
 
         // Clip to screen and clip rect.
         let x_min = lx.max(self.clip_x).max(0);
-        let x_max = rx.min(self.clip_x + self.clip_w - 1).min(SCREEN_W as i32 - 1);
+        let x_max = rx
+            .min(self.clip_x + self.clip_w - 1)
+            .min(SCREEN_W as i32 - 1);
         let y_min = ty.max(self.clip_y).max(0);
-        let y_max = by.min(self.clip_y + self.clip_h - 1).min(SCREEN_H as i32 - 1);
+        let y_max = by
+            .min(self.clip_y + self.clip_h - 1)
+            .min(SCREEN_H as i32 - 1);
 
         if x_min > x_max || y_min > y_max {
             return;
@@ -661,16 +665,7 @@ impl Console {
     /// `w` and `h` are in *sprite units* (each unit = 8 px).
     /// `flip_x` / `flip_y` mirror the sprite.
     #[allow(clippy::too_many_arguments)]
-    pub fn spr(
-        &mut self,
-        n: i32,
-        x: i32,
-        y: i32,
-        w: f64,
-        h: f64,
-        flip_x: bool,
-        flip_y: bool,
-    ) {
+    pub fn spr(&mut self, n: i32, x: i32, y: i32, w: f64, h: f64, flip_x: bool, flip_y: bool) {
         if !(0..=255).contains(&n) {
             return;
         }
@@ -858,13 +853,7 @@ impl Console {
     /// If `x` / `y` are `None` the current cursor position is used.
     /// After printing the cursor advances to the start of the *next* line.
     /// Returns the x-pixel position directly after the last character drawn.
-    pub fn print(
-        &mut self,
-        text: &str,
-        x: Option<i32>,
-        y: Option<i32>,
-        col: Option<u8>,
-    ) -> i32 {
+    pub fn print(&mut self, text: &str, x: Option<i32>, y: Option<i32>, col: Option<u8>) -> i32 {
         let c = self.resolve_color(col);
 
         let start_x = x.unwrap_or(self.cursor_x);
@@ -951,8 +940,8 @@ impl Console {
 
     /// Default transparency flags: only color 0 is transparent.
     const DEFAULT_TRANSPARENT: [bool; 16] = [
-        true, false, false, false, false, false, false, false,
-        false, false, false, false, false, false, false, false,
+        true, false, false, false, false, false, false, false, false, false, false, false, false,
+        false, false, false,
     ];
 
     /// Reset transparency so that only colour 0 is transparent.
@@ -1406,17 +1395,27 @@ mod tests {
     fn test_peek_poke_sprite_sheet() {
         let mut con = Console::new();
         // Set two adjacent pixels in the sprite sheet
-        con.sprites[0] = 3;  // left pixel of byte 0
+        con.sprites[0] = 3; // left pixel of byte 0
         con.sprites[1] = 10; // right pixel of byte 0
-        // PICO-8 packing: low nibble = left pixel, high nibble = right pixel
+                             // PICO-8 packing: low nibble = left pixel, high nibble = right pixel
         let val = con.peek(0x0000);
         assert_eq!(val & 0x0F, 3, "Low nibble should be left pixel (3)");
-        assert_eq!((val >> 4) & 0x0F, 10, "High nibble should be right pixel (10)");
+        assert_eq!(
+            (val >> 4) & 0x0F,
+            10,
+            "High nibble should be right pixel (10)"
+        );
 
         // Poke a packed byte and verify the sprite array is updated
         con.poke(0x0001, 0x75); // left=5, right=7
-        assert_eq!(con.sprites[2], 5, "Poke should set left pixel to low nibble");
-        assert_eq!(con.sprites[3], 7, "Poke should set right pixel to high nibble");
+        assert_eq!(
+            con.sprites[2], 5,
+            "Poke should set left pixel to low nibble"
+        );
+        assert_eq!(
+            con.sprites[3], 7,
+            "Poke should set right pixel to high nibble"
+        );
 
         // Round-trip
         con.poke(0x0000, 0xAB);
@@ -1555,7 +1554,11 @@ mod tests {
         let mut con = Console::new();
         con.poke(0x4300, 0x42);
         con.memset(0x4300, 0xFF, 0);
-        assert_eq!(con.peek(0x4300), 0x42, "Zero-length memset should be a no-op");
+        assert_eq!(
+            con.peek(0x4300),
+            0x42,
+            "Zero-length memset should be a no-op"
+        );
     }
 
     #[test]
@@ -1563,8 +1566,8 @@ mod tests {
         let mut con = Console::new();
         // Set pixels via the sprite array (1 byte per pixel)
         for i in 0..16u8 {
-            con.sprites[i as usize * 2] = i;           // left pixel
-            con.sprites[i as usize * 2 + 1] = 15 - i;  // right pixel
+            con.sprites[i as usize * 2] = i; // left pixel
+            con.sprites[i as usize * 2 + 1] = 15 - i; // right pixel
         }
 
         // Read back via peek (packed format)
@@ -1624,15 +1627,21 @@ mod tests {
         // Set a checkerboard-like pattern: bit 0 set means pixel (0,0) is
         // affected by the pattern.
         con.fillp(0b0000_0000_0000_0001 as f64); // only bit 0 set
-        // Draw a pixel at (0,0) — bit 0 maps to (x%4=0, y%4=0)
-        // Pattern is active (no transparency) so the pixel should be drawn
-        // with color 0 instead of the requested color.
+                                                 // Draw a pixel at (0,0) — bit 0 maps to (x%4=0, y%4=0)
+                                                 // Pattern is active (no transparency) so the pixel should be drawn
+                                                 // with color 0 instead of the requested color.
         con.raw_pset(0, 0, 7);
-        assert_eq!(con.screen[0], 0, "Pixel at (0,0) should be color 0 due to fill pattern");
+        assert_eq!(
+            con.screen[0], 0,
+            "Pixel at (0,0) should be color 0 due to fill pattern"
+        );
 
         // Pixel at (1,0) is not affected by the pattern (bit 1 is 0)
         con.raw_pset(1, 0, 7);
-        assert_eq!(con.screen[1], 7, "Pixel at (1,0) should be color 7 (pattern bit not set)");
+        assert_eq!(
+            con.screen[1], 7,
+            "Pixel at (1,0) should be color 7 (pattern bit not set)"
+        );
     }
 
     #[test]
@@ -1641,11 +1650,14 @@ mod tests {
         // Set pattern with transparency: bit 0 set, transparency on
         // Using 0.5 fractional part to enable transparency
         con.fillp(1.0 + 0.5); // pattern = 1 (bit 0), transparency = true
-        // Pre-fill screen with color 5
+                              // Pre-fill screen with color 5
         con.screen[0] = 5;
         // Draw at (0,0) — pattern bit set + transparency means pixel is skipped
         con.raw_pset(0, 0, 7);
-        assert_eq!(con.screen[0], 5, "Pixel at (0,0) should be unchanged due to transparency");
+        assert_eq!(
+            con.screen[0], 5,
+            "Pixel at (0,0) should be unchanged due to transparency"
+        );
     }
 
     #[test]
@@ -1657,11 +1669,17 @@ mod tests {
         // Clear it
         con.fillp(0.0);
         assert_eq!(con.fill_pattern, 0, "fillp(0) should clear the pattern");
-        assert_eq!(con.fill_pattern_transparency, false, "fillp(0) should clear transparency");
+        assert_eq!(
+            con.fill_pattern_transparency, false,
+            "fillp(0) should clear transparency"
+        );
 
         // Verify drawing works normally again
         con.raw_pset(0, 0, 7);
-        assert_eq!(con.screen[0], 7, "Drawing should work normally after fillp(0)");
+        assert_eq!(
+            con.screen[0], 7,
+            "Drawing should work normally after fillp(0)"
+        );
     }
 
     #[test]
@@ -1672,8 +1690,14 @@ mod tests {
         assert!(con.fill_pattern_transparency);
 
         con.reset_draw_state();
-        assert_eq!(con.fill_pattern, 0, "reset_draw_state should clear fill pattern");
-        assert_eq!(con.fill_pattern_transparency, false, "reset_draw_state should clear fill transparency");
+        assert_eq!(
+            con.fill_pattern, 0,
+            "reset_draw_state should clear fill pattern"
+        );
+        assert_eq!(
+            con.fill_pattern_transparency, false,
+            "reset_draw_state should clear fill transparency"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1711,7 +1735,11 @@ mod tests {
         con.sprites[0] = 3;
         // Draw a single-pixel line
         con.tline(10, 10, 10, 10, 0.0, 0.0, 0.0, 0.0);
-        assert_eq!(con.screen[10 * 128 + 10], 3, "Single-pixel tline should draw the sampled color");
+        assert_eq!(
+            con.screen[10 * 128 + 10],
+            3,
+            "Single-pixel tline should draw the sampled color"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1749,9 +1777,9 @@ mod tests {
     #[test]
     fn test_dset_out_of_bounds_is_noop() {
         let mut con = Console::new();
-        con.dset(-1, 999.0);  // should not panic
-        con.dset(64, 999.0);  // should not panic
-        // Verify no data was corrupted
+        con.dset(-1, 999.0); // should not panic
+        con.dset(64, 999.0); // should not panic
+                             // Verify no data was corrupted
         for i in 0..64 {
             assert_eq!(con.dget(i), 0.0);
         }
@@ -1765,7 +1793,10 @@ mod tests {
     fn test_btn_player0_returns_player1_state() {
         let mut con = Console::new();
         con.btn_state[0] = true; // player 1, button 0 (left)
-        assert!(con.btn(0, 0), "btn(0, 0) should return player 1 left button state");
+        assert!(
+            con.btn(0, 0),
+            "btn(0, 0) should return player 1 left button state"
+        );
         assert!(!con.btn(1, 0), "btn(1, 0) should be false when not pressed");
     }
 
@@ -1773,7 +1804,10 @@ mod tests {
     fn test_btn_player1_returns_player2_state() {
         let mut con = Console::new();
         con.btn_state[6] = true; // player 2, button 0 (left) => index 6
-        assert!(con.btn(0, 1), "btn(0, 1) should return player 2 left button (index 6)");
+        assert!(
+            con.btn(0, 1),
+            "btn(0, 1) should return player 2 left button (index 6)"
+        );
         assert!(!con.btn(0, 0), "btn(0, 0) should be false for player 1");
     }
 
@@ -1797,16 +1831,28 @@ mod tests {
         let mut con = Console::new();
         // Previous frame: nothing pressed
         // Current frame: player 1 button 4 (O) and player 2 button 4 (O)
-        con.btn_state[4] = true;   // player 1, button 4
-        con.btn_state[10] = true;  // player 2, button 4 (index 6+4=10)
-        assert!(con.btnp(4, 0), "btnp(4, 0) should detect player 1 just-pressed");
-        assert!(con.btnp(4, 1), "btnp(4, 1) should detect player 2 just-pressed");
+        con.btn_state[4] = true; // player 1, button 4
+        con.btn_state[10] = true; // player 2, button 4 (index 6+4=10)
+        assert!(
+            con.btnp(4, 0),
+            "btnp(4, 0) should detect player 1 just-pressed"
+        );
+        assert!(
+            con.btnp(4, 1),
+            "btnp(4, 1) should detect player 2 just-pressed"
+        );
 
         // If player 1 button was held from previous frame, btnp should be false
         con.btn_prev[4] = true;
-        assert!(!con.btnp(4, 0), "btnp(4, 0) should be false when held from previous frame");
+        assert!(
+            !con.btnp(4, 0),
+            "btnp(4, 0) should be false when held from previous frame"
+        );
         // Player 2 was not held previously, so still just-pressed
-        assert!(con.btnp(4, 1), "btnp(4, 1) should still be true for player 2");
+        assert!(
+            con.btnp(4, 1),
+            "btnp(4, 1) should still be true for player 2"
+        );
     }
 
     #[test]
@@ -1817,9 +1863,18 @@ mod tests {
             con.btn_state[i] = true;
         }
         // Player 2+ should return false (player * 6 + i >= 12)
-        assert!(!con.btn(0, 2), "btn(0, 2) should return false for out-of-bounds player");
-        assert!(!con.btn(0, 255), "btn(0, 255) should return false for out-of-bounds player");
-        assert!(!con.btn(5, 2), "btn(5, 2) should return false for out-of-bounds player");
+        assert!(
+            !con.btn(0, 2),
+            "btn(0, 2) should return false for out-of-bounds player"
+        );
+        assert!(
+            !con.btn(0, 255),
+            "btn(0, 255) should return false for out-of-bounds player"
+        );
+        assert!(
+            !con.btn(5, 2),
+            "btn(5, 2) should return false for out-of-bounds player"
+        );
     }
 
     #[test]
@@ -1828,17 +1883,29 @@ mod tests {
         for i in 0..12 {
             con.btn_state[i] = true;
         }
-        assert!(!con.btnp(0, 2), "btnp(0, 2) should return false for out-of-bounds player");
-        assert!(!con.btnp(3, 3), "btnp(3, 3) should return false for out-of-bounds player");
+        assert!(
+            !con.btnp(0, 2),
+            "btnp(0, 2) should return false for out-of-bounds player"
+        );
+        assert!(
+            !con.btnp(3, 3),
+            "btnp(3, 3) should return false for out-of-bounds player"
+        );
     }
 
     #[test]
     fn test_btn_default_player0_behavior() {
         let mut con = Console::new();
         con.btn_state[2] = true; // player 1, button 2 (up)
-        // Calling with player=0 should behave the same as the old single-arg behavior
-        assert!(con.btn(2, 0), "btn(2, 0) should return true for player 1 up");
-        assert!(!con.btn(2, 1), "btn(2, 1) should return false for player 2 up");
+                                 // Calling with player=0 should behave the same as the old single-arg behavior
+        assert!(
+            con.btn(2, 0),
+            "btn(2, 0) should return true for player 1 up"
+        );
+        assert!(
+            !con.btn(2, 1),
+            "btn(2, 1) should return false for player 2 up"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1852,13 +1919,33 @@ mod tests {
         // Center = (15, 13), semi-axes = (5, 3)
         con.oval(10, 10, 20, 16, Some(7));
         // Top center and bottom center of the ellipse should be drawn
-        assert_eq!(con.screen[10 * SCREEN_W + 15], 7, "Top center of oval should be drawn");
-        assert_eq!(con.screen[16 * SCREEN_W + 15], 7, "Bottom center of oval should be drawn");
+        assert_eq!(
+            con.screen[10 * SCREEN_W + 15],
+            7,
+            "Top center of oval should be drawn"
+        );
+        assert_eq!(
+            con.screen[16 * SCREEN_W + 15],
+            7,
+            "Bottom center of oval should be drawn"
+        );
         // Left and right extremes at the center row
-        assert_eq!(con.screen[13 * SCREEN_W + 10], 7, "Left extreme of oval should be drawn");
-        assert_eq!(con.screen[13 * SCREEN_W + 20], 7, "Right extreme of oval should be drawn");
+        assert_eq!(
+            con.screen[13 * SCREEN_W + 10],
+            7,
+            "Left extreme of oval should be drawn"
+        );
+        assert_eq!(
+            con.screen[13 * SCREEN_W + 20],
+            7,
+            "Right extreme of oval should be drawn"
+        );
         // The center of the ellipse should NOT be drawn (it's just an outline)
-        assert_ne!(con.screen[13 * SCREEN_W + 15], 7, "Center of oval should not be drawn (outline only)");
+        assert_ne!(
+            con.screen[13 * SCREEN_W + 15],
+            7,
+            "Center of oval should not be drawn (outline only)"
+        );
     }
 
     #[test]
@@ -1867,13 +1954,29 @@ mod tests {
         // Draw a filled ellipse in bounding box (10,10) to (20,16)
         con.ovalfill(10, 10, 20, 16, Some(5));
         // Center should be filled
-        assert_eq!(con.screen[13 * SCREEN_W + 15], 5, "Center of filled oval should be drawn");
+        assert_eq!(
+            con.screen[13 * SCREEN_W + 15],
+            5,
+            "Center of filled oval should be drawn"
+        );
         // Top center should be filled
-        assert_eq!(con.screen[10 * SCREEN_W + 15], 5, "Top center of filled oval should be drawn");
+        assert_eq!(
+            con.screen[10 * SCREEN_W + 15],
+            5,
+            "Top center of filled oval should be drawn"
+        );
         // Bottom center should be filled
-        assert_eq!(con.screen[16 * SCREEN_W + 15], 5, "Bottom center of filled oval should be drawn");
+        assert_eq!(
+            con.screen[16 * SCREEN_W + 15],
+            5,
+            "Bottom center of filled oval should be drawn"
+        );
         // A pixel clearly outside the ellipse should not be filled
-        assert_ne!(con.screen[10 * SCREEN_W + 10], 5, "Corner of bounding box should not be filled");
+        assert_ne!(
+            con.screen[10 * SCREEN_W + 10],
+            5,
+            "Corner of bounding box should not be filled"
+        );
     }
 
     #[test]
@@ -1881,14 +1984,22 @@ mod tests {
         let mut con = Console::new();
         // Bounding box of size 0x0 => single pixel
         con.oval(50, 50, 50, 50, Some(8));
-        assert_eq!(con.screen[50 * SCREEN_W + 50], 8, "Degenerate oval should draw single pixel");
+        assert_eq!(
+            con.screen[50 * SCREEN_W + 50],
+            8,
+            "Degenerate oval should draw single pixel"
+        );
     }
 
     #[test]
     fn test_ovalfill_single_pixel() {
         let mut con = Console::new();
         con.ovalfill(50, 50, 50, 50, Some(8));
-        assert_eq!(con.screen[50 * SCREEN_W + 50], 8, "Degenerate ovalfill should draw single pixel");
+        assert_eq!(
+            con.screen[50 * SCREEN_W + 50],
+            8,
+            "Degenerate ovalfill should draw single pixel"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2024,7 +2135,11 @@ mod tests {
 
         // reload from ROM offset 0x0000 to live 0x4300
         con.reload(0x4300, 0x0000, 1);
-        assert_eq!(con.peek(0x4300), 0x42, "reload with different src/dest should work");
+        assert_eq!(
+            con.peek(0x4300),
+            0x42,
+            "reload with different src/dest should work"
+        );
     }
 
     #[test]
@@ -2033,7 +2148,7 @@ mod tests {
         // Try to write beyond cart_rom size; should not panic
         con.poke(0x4300, 0xFF);
         con.cstore(0x42FF, 0x4300, 5); // starts at last valid, goes past
-        // Only the first byte should have been written
+                                       // Only the first byte should have been written
         assert_eq!(con.cart_rom[0x42FF], 0xFF);
     }
 
@@ -2043,6 +2158,10 @@ mod tests {
         con.cart_rom[0x42FF] = 0xEE;
         // Try to read beyond cart_rom size; should not panic
         con.reload(0x4300, 0x42FF, 5);
-        assert_eq!(con.peek(0x4300), 0xEE, "First byte within ROM should be copied");
+        assert_eq!(
+            con.peek(0x4300),
+            0xEE,
+            "First byte within ROM should be copied"
+        );
     }
 }

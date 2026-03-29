@@ -104,10 +104,7 @@ fn main() -> ! {
     // Safety: HEAP_MEM is a static mut only accessed here before any
     // allocations occur. The heap is initialized exactly once.
     unsafe {
-        HEAP.init(
-            core::ptr::addr_of_mut!(HEAP_MEM) as usize,
-            HEAP_SIZE,
-        );
+        HEAP.init(core::ptr::addr_of_mut!(HEAP_MEM) as usize, HEAP_SIZE);
     }
 
     // ------------------------------------------------------------------
@@ -152,10 +149,7 @@ fn main() -> ! {
     let _ = bl_pin.set_high();
 
     // rp235x-hal SPI::new takes (TX/MOSI, SCK) order
-    let spi_device = rp235x_hal::spi::Spi::<_, _, _, 8>::new(
-        pac.SPI0,
-        (mosi_pin, sck_pin),
-    );
+    let spi_device = rp235x_hal::spi::Spi::<_, _, _, 8>::new(pac.SPI0, (mosi_pin, sck_pin));
 
     let spi = spi_device.init(
         &mut pac.RESETS,
@@ -293,8 +287,7 @@ fn main() -> ! {
             // Pad 8 hardware buttons to 12 for Console (player 2 unused).
             let st = input_state.state();
             let padded = [
-                st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7],
-                false, false, false, false,
+                st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7], false, false, false, false,
             ];
             console.update_input(padded);
 

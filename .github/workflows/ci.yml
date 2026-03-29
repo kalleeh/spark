@@ -60,4 +60,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build spark-pico (release)
+        env:
+          CC_thumbv8m_main_none_eabihf: arm-none-eabi-gcc
+          AR_thumbv8m_main_none_eabihf: arm-none-eabi-ar
         run: cargo build --release -p spark-pico --target thumbv8m.main-none-eabihf

@@ -247,7 +247,11 @@ impl Audio {
         // Clamp / validate.
         let sfx_idx = n.clamp(0, (NUM_SFX - 1) as i32) as u8;
         let note_offset = offset.clamp(0, (NOTES_PER_SFX - 1) as i32) as u8;
-        let note_length = if length <= 0 { 0u8 } else { (length as u8).min(32) };
+        let note_length = if length <= 0 {
+            0u8
+        } else {
+            (length as u8).min(32)
+        };
 
         // Determine which channel to use.
         let ch = if channel >= 0 && (channel as usize) < NUM_CHANNELS {
@@ -272,9 +276,7 @@ impl Audio {
 
     /// Find the first channel that isn't playing anything.
     fn find_free_channel(&self) -> Option<usize> {
-        self.sfx_playing
-            .iter()
-            .position(|p| p.is_none())
+        self.sfx_playing.iter().position(|p| p.is_none())
     }
 
     /// Find the channel whose SFX started earliest (oldest).
@@ -428,8 +430,7 @@ impl Audio {
             }
         } else {
             // Advance oscillator phase for waveform generation.
-            let current_note_idx =
-                (player.note_index as usize).min(NOTES_PER_SFX - 1);
+            let current_note_idx = (player.note_index as usize).min(NOTES_PER_SFX - 1);
             let note = &sfx.notes[current_note_idx];
             if note.volume > 0 {
                 let freq = Self::pitch_to_freq(note.pitch);
@@ -626,7 +627,7 @@ impl Audio {
         effect: u8,
         base_freq: f64,
         base_vol: f64,
-        progress: f64,    // 0.0..1.0 within current note
+        progress: f64, // 0.0..1.0 within current note
         next_freq: Option<f64>,
         sample_pos: u32,
     ) -> (f64, f64) {
@@ -730,21 +731,15 @@ impl Audio {
                 }
             }
             // 5 — Organ (fundamental + 1st overtone)
-            5 => {
-                (libm::sin(phase * TAU) + libm::sin(phase * TAU * 2.0)) * 0.5
-            }
+            5 => (libm::sin(phase * TAU) + libm::sin(phase * TAU * 2.0)) * 0.5,
             // 6 — Noise (deterministic PRNG seeded by quantised phase)
             6 => {
                 let seed = (phase * 65536.0) as u32;
-                let hash = seed
-                    .wrapping_mul(1_103_515_245)
-                    .wrapping_add(12345);
+                let hash = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
                 (hash as f64 / u32::MAX as f64) * 2.0 - 1.0
             }
             // 7 — Phaser (FM-like)
-            7 => {
-                libm::sin(phase * TAU + libm::sin(phase * TAU * 3.0))
-            }
+            7 => libm::sin(phase * TAU + libm::sin(phase * TAU * 3.0)),
             _ => 0.0,
         }
     }
@@ -777,9 +772,7 @@ impl Audio {
 
     /// Returns the current music pattern index, or -1 if music is stopped.
     pub fn current_music_pattern(&self) -> i32 {
-        self.music_playing
-            .as_ref()
-            .map_or(-1, |m| m.pattern_index)
+        self.music_playing.as_ref().map_or(-1, |m| m.pattern_index)
     }
 }
 
@@ -1038,17 +1031,24 @@ mod tests {
         audio_quiet.generate_samples(44100, &mut quiet_samples);
 
         let rms_loud: f64 = libm::sqrt(
-            loud_samples.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>()
+            loud_samples
+                .iter()
+                .map(|&s| (s as f64) * (s as f64))
+                .sum::<f64>()
                 / loud_samples.len() as f64,
         );
         let rms_quiet: f64 = libm::sqrt(
-            quiet_samples.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>()
+            quiet_samples
+                .iter()
+                .map(|&s| (s as f64) * (s as f64))
+                .sum::<f64>()
                 / quiet_samples.len() as f64,
         );
         assert!(
             rms_loud > rms_quiet,
             "Loud RMS ({}) should be greater than quiet RMS ({})",
-            rms_loud, rms_quiet
+            rms_loud,
+            rms_quiet
         );
     }
 
@@ -1058,7 +1058,10 @@ mod tests {
         audio.sfx(0, 0, 0, 0);
         let mut samples = vec![0.0f32; 1470];
         audio.generate_samples(44100, &mut samples);
-        assert!(samples.iter().all(|&s| s == 0.0), "Volume-0 should be silent");
+        assert!(
+            samples.iter().all(|&s| s == 0.0),
+            "Volume-0 should be silent"
+        );
     }
 
     #[test]
@@ -1066,7 +1069,10 @@ mod tests {
         let mut audio = Audio::new();
         for i in 0..2 {
             audio.sfx_data[0].notes[i] = Note {
-                pitch: 24, waveform: 0, volume: 5, effect: 0,
+                pitch: 24,
+                waveform: 0,
+                volume: 5,
+                effect: 0,
             };
         }
         audio.sfx_data[0].speed = 1;
@@ -1074,7 +1080,10 @@ mod tests {
         // At speed 1, each note ~ 344 samples. 2 notes ~ 688. Generate 2000.
         let mut buf = vec![0.0f32; 2000];
         audio.generate_samples(44100, &mut buf);
-        assert!(audio.sfx_playing[0].is_none(), "Channel should be inactive after SFX completes");
+        assert!(
+            audio.sfx_playing[0].is_none(),
+            "Channel should be inactive after SFX completes"
+        );
     }
 
     #[test]
@@ -1082,7 +1091,10 @@ mod tests {
         let mut audio = audio_with_sfx0();
         for i in 0..NOTES_PER_SFX {
             audio.sfx_data[1].notes[i] = Note {
-                pitch: 36, waveform: 0, volume: 5, effect: 0,
+                pitch: 36,
+                waveform: 0,
+                volume: 5,
+                effect: 0,
             };
         }
         audio.sfx_data[1].speed = 16;
@@ -1091,14 +1103,20 @@ mod tests {
         let mut samples = vec![0.0f32; 1470];
         audio.generate_samples(44100, &mut samples);
         assert!(samples.iter().any(|&s| s != 0.0));
-        assert!(samples.iter().all(|&s| s >= -1.0 && s <= 1.0), "Samples should be in [-1, 1]");
+        assert!(
+            samples.iter().all(|&s| s >= -1.0 && s <= 1.0),
+            "Samples should be in [-1, 1]"
+        );
     }
 
     #[test]
     fn test_effect_fade_in() {
         let mut audio = Audio::new();
         audio.sfx_data[0].notes[0] = Note {
-            pitch: 24, waveform: 3, volume: 7, effect: 4, // fade in
+            pitch: 24,
+            waveform: 3,
+            volume: 7,
+            effect: 4, // fade in
         };
         audio.sfx_data[0].speed = 32;
         audio.sfx(0, 0, 0, 1);
@@ -1106,19 +1124,35 @@ mod tests {
         audio.generate_samples(44100, &mut samples);
 
         let early_rms: f64 = libm::sqrt(
-            samples[0..100].iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / 100.0,
+            samples[0..100]
+                .iter()
+                .map(|&s| (s as f64) * (s as f64))
+                .sum::<f64>()
+                / 100.0,
         );
         let late_rms: f64 = libm::sqrt(
-            samples[1370..1470].iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / 100.0,
+            samples[1370..1470]
+                .iter()
+                .map(|&s| (s as f64) * (s as f64))
+                .sum::<f64>()
+                / 100.0,
         );
-        assert!(late_rms > early_rms, "Fade-in: late ({}) > early ({})", late_rms, early_rms);
+        assert!(
+            late_rms > early_rms,
+            "Fade-in: late ({}) > early ({})",
+            late_rms,
+            early_rms
+        );
     }
 
     #[test]
     fn test_effect_fade_out() {
         let mut audio = Audio::new();
         audio.sfx_data[0].notes[0] = Note {
-            pitch: 24, waveform: 3, volume: 7, effect: 5, // fade out
+            pitch: 24,
+            waveform: 3,
+            volume: 7,
+            effect: 5, // fade out
         };
         audio.sfx_data[0].speed = 32;
         audio.sfx(0, 0, 0, 1);
@@ -1126,30 +1160,61 @@ mod tests {
         audio.generate_samples(44100, &mut samples);
 
         let early_rms: f64 = libm::sqrt(
-            samples[0..100].iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / 100.0,
+            samples[0..100]
+                .iter()
+                .map(|&s| (s as f64) * (s as f64))
+                .sum::<f64>()
+                / 100.0,
         );
         let late_rms: f64 = libm::sqrt(
-            samples[1370..1470].iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / 100.0,
+            samples[1370..1470]
+                .iter()
+                .map(|&s| (s as f64) * (s as f64))
+                .sum::<f64>()
+                / 100.0,
         );
-        assert!(early_rms > late_rms, "Fade-out: early ({}) > late ({})", early_rms, late_rms);
+        assert!(
+            early_rms > late_rms,
+            "Fade-out: early ({}) > late ({})",
+            early_rms,
+            late_rms
+        );
     }
 
     #[test]
     fn test_effect_slide() {
         let mut audio = Audio::new();
-        audio.sfx_data[0].notes[0] = Note { pitch: 24, waveform: 0, volume: 7, effect: 1 };
-        audio.sfx_data[0].notes[1] = Note { pitch: 36, waveform: 0, volume: 7, effect: 0 };
+        audio.sfx_data[0].notes[0] = Note {
+            pitch: 24,
+            waveform: 0,
+            volume: 7,
+            effect: 1,
+        };
+        audio.sfx_data[0].notes[1] = Note {
+            pitch: 36,
+            waveform: 0,
+            volume: 7,
+            effect: 0,
+        };
         audio.sfx_data[0].speed = 64;
         audio.sfx(0, 0, 0, 2);
         let mut samples = vec![0.0f32; 1470];
         audio.generate_samples(44100, &mut samples);
-        assert!(samples.iter().any(|&s| s != 0.0), "Slide should produce sound");
+        assert!(
+            samples.iter().any(|&s| s != 0.0),
+            "Slide should produce sound"
+        );
     }
 
     #[test]
     fn test_effect_drop() {
         let mut audio = Audio::new();
-        audio.sfx_data[0].notes[0] = Note { pitch: 24, waveform: 0, volume: 7, effect: 3 };
+        audio.sfx_data[0].notes[0] = Note {
+            pitch: 24,
+            waveform: 0,
+            volume: 7,
+            effect: 3,
+        };
         audio.sfx_data[0].speed = 32;
         audio.sfx(0, 0, 0, 1);
         let mut samples = vec![0.0f32; 1470];
@@ -1160,7 +1225,12 @@ mod tests {
     #[test]
     fn test_effect_vibrato() {
         let mut audio = Audio::new();
-        audio.sfx_data[0].notes[0] = Note { pitch: 24, waveform: 0, volume: 7, effect: 2 };
+        audio.sfx_data[0].notes[0] = Note {
+            pitch: 24,
+            waveform: 0,
+            volume: 7,
+            effect: 2,
+        };
         audio.sfx_data[0].speed = 32;
         audio.sfx(0, 0, 0, 1);
         let mut samples = vec![0.0f32; 1470];
@@ -1171,7 +1241,12 @@ mod tests {
     #[test]
     fn test_effect_arpeggio_fast() {
         let mut audio = Audio::new();
-        audio.sfx_data[0].notes[0] = Note { pitch: 24, waveform: 0, volume: 7, effect: 6 };
+        audio.sfx_data[0].notes[0] = Note {
+            pitch: 24,
+            waveform: 0,
+            volume: 7,
+            effect: 6,
+        };
         audio.sfx_data[0].speed = 32;
         audio.sfx(0, 0, 0, 1);
         let mut samples = vec![0.0f32; 1470];
@@ -1182,7 +1257,12 @@ mod tests {
     #[test]
     fn test_effect_arpeggio_slow() {
         let mut audio = Audio::new();
-        audio.sfx_data[0].notes[0] = Note { pitch: 24, waveform: 0, volume: 7, effect: 7 };
+        audio.sfx_data[0].notes[0] = Note {
+            pitch: 24,
+            waveform: 0,
+            volume: 7,
+            effect: 7,
+        };
         audio.sfx_data[0].speed = 32;
         audio.sfx(0, 0, 0, 1);
         let mut samples = vec![0.0f32; 1470];
@@ -1204,7 +1284,11 @@ mod tests {
         let mut buf = vec![0.0f32; 44100];
         audio.generate_samples(44100, &mut buf);
         if let Some(ref player) = audio.sfx_playing[0] {
-            assert!(player.phase >= 0.0 && player.phase < 1.0, "Phase: {}", player.phase);
+            assert!(
+                player.phase >= 0.0 && player.phase < 1.0,
+                "Phase: {}",
+                player.phase
+            );
         }
     }
 
@@ -1217,7 +1301,10 @@ mod tests {
         audio.sfx(0, 0, 0, 0);
         let mut buf = vec![0.0f32; 15000];
         audio.generate_samples(44100, &mut buf);
-        assert!(audio.sfx_playing[0].is_some(), "Looping SFX should stay active");
+        assert!(
+            audio.sfx_playing[0].is_some(),
+            "Looping SFX should stay active"
+        );
         if let Some(ref player) = audio.sfx_playing[0] {
             let ni = player.note_index as usize;
             assert!(ni >= 2 && ni < 4, "Note index {} should be in [2, 4)", ni);
@@ -1246,7 +1333,10 @@ mod tests {
         let mut audio = audio_with_sfx0();
         for i in 0..NOTES_PER_SFX {
             audio.sfx_data[1].notes[i] = Note {
-                pitch: 36, waveform: 2, volume: 4, effect: 0,
+                pitch: 36,
+                waveform: 2,
+                volume: 4,
+                effect: 0,
             };
         }
         audio.sfx_data[1].speed = 16;
@@ -1259,6 +1349,9 @@ mod tests {
         assert!(audio.sfx_playing[1].is_some());
         let mut samples = vec![0.0f32; 1470];
         audio.generate_samples(44100, &mut samples);
-        assert!(samples.iter().any(|&s| s != 0.0), "Music should produce audio");
+        assert!(
+            samples.iter().any(|&s| s != 0.0),
+            "Music should produce audio"
+        );
     }
 }

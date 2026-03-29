@@ -47,22 +47,22 @@ const OFFSET_Y: u16 = (LCD_H - SCREEN_H) / 2;
 
 /// PICO-8 16-color palette in RGB565 format.
 const PALETTE_RGB565: [u16; 16] = [
-    rgb888_to_rgb565(0, 0, 0),         // 0 black
-    rgb888_to_rgb565(29, 43, 83),      // 1 dark_blue
-    rgb888_to_rgb565(126, 37, 83),     // 2 dark_purple
-    rgb888_to_rgb565(0, 135, 81),      // 3 dark_green
-    rgb888_to_rgb565(171, 82, 54),     // 4 brown
-    rgb888_to_rgb565(95, 87, 79),      // 5 dark_grey
-    rgb888_to_rgb565(194, 195, 199),   // 6 light_grey
-    rgb888_to_rgb565(255, 241, 232),   // 7 white
-    rgb888_to_rgb565(255, 0, 77),      // 8 red
-    rgb888_to_rgb565(255, 163, 0),     // 9 orange
-    rgb888_to_rgb565(255, 236, 39),    // 10 yellow
-    rgb888_to_rgb565(0, 228, 54),      // 11 green
-    rgb888_to_rgb565(41, 173, 255),    // 12 blue
-    rgb888_to_rgb565(131, 118, 156),   // 13 indigo/lavender
-    rgb888_to_rgb565(255, 119, 168),   // 14 pink
-    rgb888_to_rgb565(255, 204, 170),   // 15 peach
+    rgb888_to_rgb565(0, 0, 0),       // 0 black
+    rgb888_to_rgb565(29, 43, 83),    // 1 dark_blue
+    rgb888_to_rgb565(126, 37, 83),   // 2 dark_purple
+    rgb888_to_rgb565(0, 135, 81),    // 3 dark_green
+    rgb888_to_rgb565(171, 82, 54),   // 4 brown
+    rgb888_to_rgb565(95, 87, 79),    // 5 dark_grey
+    rgb888_to_rgb565(194, 195, 199), // 6 light_grey
+    rgb888_to_rgb565(255, 241, 232), // 7 white
+    rgb888_to_rgb565(255, 0, 77),    // 8 red
+    rgb888_to_rgb565(255, 163, 0),   // 9 orange
+    rgb888_to_rgb565(255, 236, 39),  // 10 yellow
+    rgb888_to_rgb565(0, 228, 54),    // 11 green
+    rgb888_to_rgb565(41, 173, 255),  // 12 blue
+    rgb888_to_rgb565(131, 118, 156), // 13 indigo/lavender
+    rgb888_to_rgb565(255, 119, 168), // 14 pink
+    rgb888_to_rgb565(255, 204, 170), // 15 peach
 ];
 
 /// ST7789 display driver wrapper.

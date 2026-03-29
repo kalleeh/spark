@@ -71,11 +71,7 @@ extern "C" {
     pub fn lua_toboolean(L: *mut LuaState, idx: i32) -> i32;
     pub fn lua_tointegerx(L: *mut LuaState, idx: i32, isnum: *mut i32) -> i32;
     pub fn lua_tonumberx(L: *mut LuaState, idx: i32, isnum: *mut i32) -> f32;
-    pub fn lua_tolstring(
-        L: *mut LuaState,
-        idx: i32,
-        len: *mut usize,
-    ) -> *const core::ffi::c_char;
+    pub fn lua_tolstring(L: *mut LuaState, idx: i32, len: *mut usize) -> *const core::ffi::c_char;
     pub fn lua_type(L: *mut LuaState, idx: i32) -> i32;
 
     // -- Table operations --
@@ -827,7 +823,11 @@ unsafe extern "C" fn api_shr(L: *mut LuaState) -> i32 {
     let a = arg_f32(L, 1) as i32;
     let b = arg_f32(L, 2) as u32;
     let result = if b >= 32 {
-        if a < 0 { -1 } else { 0 }
+        if a < 0 {
+            -1
+        } else {
+            0
+        }
     } else {
         a >> b
     };
@@ -988,15 +988,30 @@ unsafe extern "C" fn api_stat(L: *mut LuaState) -> i32 {
     let n = arg_i32(L, 1);
     match n {
         // stat(0): memory usage (fake value)
-        0 => { lua_pushnumber(L, 64.0); 1 }
+        0 => {
+            lua_pushnumber(L, 64.0);
+            1
+        }
         // stat(1): CPU usage
-        1 => { lua_pushnumber(L, 0.0); 1 }
+        1 => {
+            lua_pushnumber(L, 0.0);
+            1
+        }
         // stat(4): clipboard (empty string)
-        4 => { lua_pushstring(L, c"".as_ptr()); 1 }
+        4 => {
+            lua_pushstring(L, c"".as_ptr());
+            1
+        }
         // stat(6): parameter string (empty string)
-        6 => { lua_pushstring(L, c"".as_ptr()); 1 }
+        6 => {
+            lua_pushstring(L, c"".as_ptr());
+            1
+        }
         // stat(7): target FPS
-        7 => { lua_pushnumber(L, 30.0); 1 }
+        7 => {
+            lua_pushnumber(L, 30.0);
+            1
+        }
         // stat(16-19): SFX currently playing on channel 0-3
         16..=19 => {
             let ch = (n - 16) as usize;
@@ -1025,7 +1040,10 @@ unsafe extern "C" fn api_stat(L: *mut LuaState) -> i32 {
             1
         }
         // stat(30): key pressed this frame (boolean-like, false on embedded)
-        30 => { lua_pushboolean(L, console().key_pressed as i32); 1 }
+        30 => {
+            lua_pushboolean(L, console().key_pressed as i32);
+            1
+        }
         // stat(31): last key char (empty string on embedded)
         31 => {
             match console().last_key_char {
@@ -1037,15 +1055,27 @@ unsafe extern "C" fn api_stat(L: *mut LuaState) -> i32 {
                     lua_pushstring(L, buf.as_ptr() as *const core::ffi::c_char);
                     1
                 }
-                None => { lua_pushstring(L, c"".as_ptr()); 1 }
+                None => {
+                    lua_pushstring(L, c"".as_ptr());
+                    1
+                }
             }
         }
         // stat(32): mouse x
-        32 => { lua_pushnumber(L, console().mouse_x as f32); 1 }
+        32 => {
+            lua_pushnumber(L, console().mouse_x as f32);
+            1
+        }
         // stat(33): mouse y
-        33 => { lua_pushnumber(L, console().mouse_y as f32); 1 }
+        33 => {
+            lua_pushnumber(L, console().mouse_y as f32);
+            1
+        }
         // stat(34): mouse buttons bitmask
-        34 => { lua_pushnumber(L, console().mouse_btn as f32); 1 }
+        34 => {
+            lua_pushnumber(L, console().mouse_btn as f32);
+            1
+        }
         // stat(46-49): SFX currently playing (alias for 16-19)
         46..=49 => {
             let ch = (n - 46) as usize;
@@ -1060,7 +1090,10 @@ unsafe extern "C" fn api_stat(L: *mut LuaState) -> i32 {
             lua_pushnumber(L, val as f32);
             1
         }
-        _ => { lua_pushnumber(L, 0.0); 1 }
+        _ => {
+            lua_pushnumber(L, 0.0);
+            1
+        }
     }
 }
 
@@ -1080,12 +1113,12 @@ unsafe extern "C" fn api_fillp(L: *mut LuaState) -> i32 {
 
 /// `tline(x0, y0, x1, y1, mx, my, mdx, mdy)` -- draw textured line
 unsafe extern "C" fn api_tline(L: *mut LuaState) -> i32 {
-    let x0  = arg_i32(L, 1);
-    let y0  = arg_i32(L, 2);
-    let x1  = arg_i32(L, 3);
-    let y1  = arg_i32(L, 4);
-    let mx  = opt_arg_f32(L, 5).unwrap_or(0.0) as f64;
-    let my  = opt_arg_f32(L, 6).unwrap_or(0.0) as f64;
+    let x0 = arg_i32(L, 1);
+    let y0 = arg_i32(L, 2);
+    let x1 = arg_i32(L, 3);
+    let y1 = arg_i32(L, 4);
+    let mx = opt_arg_f32(L, 5).unwrap_or(0.0) as f64;
+    let my = opt_arg_f32(L, 6).unwrap_or(0.0) as f64;
     let mdx = opt_arg_f32(L, 7).unwrap_or(0.125) as f64;
     let mdy = opt_arg_f32(L, 8).unwrap_or(0.0) as f64;
     console().tline(x0, y0, x1, y1, mx, my, mdx, mdy);
@@ -1327,7 +1360,8 @@ pub unsafe fn register_api(L: *mut LuaState) {
     lua_pcall(L, 0, 0, 0);
 
     // PICO-8's `tostr()` and `tonum()`
-    let tostr_lua = c"function tostr(v)\n  if v==nil then return 'nil' end\n  return tostring(v)\nend";
+    let tostr_lua =
+        c"function tostr(v)\n  if v==nil then return 'nil' end\n  return tostring(v)\nend";
     luaL_loadstring(L, tostr_lua.as_ptr());
     lua_pcall(L, 0, 0, 0);
 

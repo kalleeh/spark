@@ -348,9 +348,9 @@ mod tests {
         let s3 = i16::from_le_bytes([buf[50], buf[51]]);
         let s4 = i16::from_le_bytes([buf[52], buf[53]]);
 
-        assert_eq!(s0, 32767);  // 1.0
+        assert_eq!(s0, 32767); // 1.0
         assert_eq!(s1, -32767); // -1.0 (clamped, so -32767 not -32768)
-        assert_eq!(s2, 0);      // 0.0
+        assert_eq!(s2, 0); // 0.0
         assert!((s3 - 16383).abs() <= 1); // 0.5 ~ 16383
         assert!((s4 - (-16383)).abs() <= 1); // -0.5 ~ -16383
     }
@@ -364,7 +364,7 @@ mod tests {
         let s0 = i16::from_le_bytes([buf[44], buf[45]]);
         let s1 = i16::from_le_bytes([buf[46], buf[47]]);
 
-        assert_eq!(s0, 32767);  // clamped from 2.0
+        assert_eq!(s0, 32767); // clamped from 2.0
         assert_eq!(s1, -32767); // clamped from -3.0
     }
 

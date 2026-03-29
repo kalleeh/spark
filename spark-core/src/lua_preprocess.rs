@@ -1,7 +1,7 @@
 use alloc::collections::BTreeSet;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::format;
 
 /// Pre-process PICO-8 Lua syntax into standard Lua 5.4.
 ///
@@ -574,7 +574,9 @@ fn try_shorthand_if(trimmed: &str, original: &str) -> Option<String> {
         let stmt1 = rest[..else_pos].trim();
         let after_else = rest[else_pos + 4..].trim();
         if !stmt1.is_empty() && !after_else.is_empty() {
-            return Some(format!("{indent}if {cond} then {stmt1} else {after_else} end"));
+            return Some(format!(
+                "{indent}if {cond} then {stmt1} else {after_else} end"
+            ));
         }
     }
 
@@ -808,9 +810,7 @@ fn try_compound_assign(line: &str, op: &str, lua_op: &str) -> Option<String> {
         }
 
         // Check for compound operator match
-        if i + op_chars.len() <= chars.len()
-            && chars[i..i + op_chars.len()] == op_chars[..]
-        {
+        if i + op_chars.len() <= chars.len() && chars[i..i + op_chars.len()] == op_chars[..] {
             if let Some((var, prefix_end)) = extract_lvalue_backwards(&result) {
                 let expr_start = i + op_chars.len();
                 let (expr, expr_end) = extract_rhs_expr(&chars, expr_start);
@@ -829,7 +829,11 @@ fn try_compound_assign(line: &str, op: &str, lua_op: &str) -> Option<String> {
         i += 1;
     }
 
-    if changed { Some(result) } else { None }
+    if changed {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Look backwards from the end of `built` to extract an l-value (variable name).
@@ -861,7 +865,12 @@ fn extract_lvalue_backwards(built: &str) -> Option<(String, usize)> {
             } else {
                 break;
             }
-        } else if bracket_depth > 0 || ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == ':' {
+        } else if bracket_depth > 0
+            || ch.is_ascii_alphanumeric()
+            || ch == '_'
+            || ch == '.'
+            || ch == ':'
+        {
             start -= 1;
         } else {
             break;
@@ -1114,7 +1123,10 @@ mod tests {
     #[test]
     fn test_shorthand_if_deeply_nested_parens() {
         let out = preprocess_pico8("if ((a>0) and (b<10 or (c==5))) do_thing()\n");
-        assert_eq!(out.trim(), "if (a>0) and (b<10 or (c==5)) then do_thing() end");
+        assert_eq!(
+            out.trim(),
+            "if (a>0) and (b<10 or (c==5)) then do_thing() end"
+        );
     }
 
     #[test]
@@ -1443,11 +1455,23 @@ mod tests {
         // Operators like +=, !=, and ?expr inside multi-line strings must NOT be transformed.
         let input = "s = [[\nx += 1\na != b\n?expr\n]]\n";
         let out = preprocess_pico8(input);
-        assert!(out.contains("x += 1"), "'+=' inside multiline string should not be transformed");
-        assert!(out.contains("a != b"), "'!=' inside multiline string should not be transformed");
-        assert!(out.contains("?expr"), "'?expr' inside multiline string should not be transformed");
+        assert!(
+            out.contains("x += 1"),
+            "'+=' inside multiline string should not be transformed"
+        );
+        assert!(
+            out.contains("a != b"),
+            "'!=' inside multiline string should not be transformed"
+        );
+        assert!(
+            out.contains("?expr"),
+            "'?expr' inside multiline string should not be transformed"
+        );
         // Make sure it does NOT contain the transformed versions
-        assert!(!out.contains("print(expr)"), "?expr should not become print(expr) inside [[]]");
+        assert!(
+            !out.contains("print(expr)"),
+            "?expr should not become print(expr) inside [[]]"
+        );
         assert!(!out.contains("~="), "!= should not become ~= inside [[]]");
     }
 
@@ -1472,7 +1496,10 @@ mod tests {
         let input = "x = [==[\nhello\na += 1\n]==]\n";
         let out = preprocess_pico8(input);
         assert!(out.contains("[==["));
-        assert!(out.contains("a += 1"), "+= inside [==[]==] should not be transformed");
+        assert!(
+            out.contains("a += 1"),
+            "+= inside [==[]==] should not be transformed"
+        );
         assert!(out.contains("]==]"));
     }
 
@@ -1481,8 +1508,14 @@ mod tests {
         // `[[` inside a regular string should NOT start a multi-line block.
         let input = "x = \"[[\"\ny+=1\n";
         let out = preprocess_pico8(input);
-        assert!(out.contains("\"[[\""), "string containing [[ should be preserved");
-        assert!(out.contains("y = y + (1)"), "+= on next line should be transformed");
+        assert!(
+            out.contains("\"[[\""),
+            "string containing [[ should be preserved"
+        );
+        assert!(
+            out.contains("y = y + (1)"),
+            "+= on next line should be transformed"
+        );
     }
 
     #[test]
@@ -1490,10 +1523,19 @@ mod tests {
         // --[[ starts a multi-line comment in Lua.
         let input = "--[[\nx += 1\na != b\n]]\ny+=1\n";
         let out = preprocess_pico8(input);
-        assert!(out.contains("x += 1"), "+= inside --[[]] comment should not be transformed");
-        assert!(out.contains("a != b"), "!= inside --[[]] comment should not be transformed");
+        assert!(
+            out.contains("x += 1"),
+            "+= inside --[[]] comment should not be transformed"
+        );
+        assert!(
+            out.contains("a != b"),
+            "!= inside --[[]] comment should not be transformed"
+        );
         // The line after the comment should be processed normally.
-        assert!(out.contains("y = y + (1)"), "+= after comment should be transformed");
+        assert!(
+            out.contains("y = y + (1)"),
+            "+= after comment should be transformed"
+        );
     }
 
     #[test]
@@ -1510,9 +1552,18 @@ mod tests {
         let input = "data = [[\nif (x>0) do_thing()\nscore += 100\nresult != nil\n]]\n";
         let out = preprocess_pico8(input);
         // None of these should be transformed
-        assert!(out.contains("if (x>0) do_thing()"), "shorthand if inside [[]] should not be transformed");
-        assert!(out.contains("score += 100"), "+= inside [[]] should not be transformed");
-        assert!(out.contains("result != nil"), "!= inside [[]] should not be transformed");
+        assert!(
+            out.contains("if (x>0) do_thing()"),
+            "shorthand if inside [[]] should not be transformed"
+        );
+        assert!(
+            out.contains("score += 100"),
+            "+= inside [[]] should not be transformed"
+        );
+        assert!(
+            out.contains("result != nil"),
+            "!= inside [[]] should not be transformed"
+        );
     }
 
     #[test]
@@ -1520,7 +1571,10 @@ mod tests {
         let input = "s = [[\nhello\n]]\nx+=1\n";
         let out = preprocess_pico8(input);
         assert!(out.contains("hello"));
-        assert!(out.contains("x = x + (1)"), "+= after ]] should be transformed");
+        assert!(
+            out.contains("x = x + (1)"),
+            "+= after ]] should be transformed"
+        );
     }
 
     #[test]
@@ -1530,7 +1584,10 @@ mod tests {
         let out = preprocess_pico8(input);
         assert!(out.contains("0000000000000000"));
         assert!(out.contains("1111111111111111"));
-        assert!(out.contains("count = count + (1)"), "+= after multiline string should be transformed");
+        assert!(
+            out.contains("count = count + (1)"),
+            "+= after multiline string should be transformed"
+        );
     }
 
     #[test]
@@ -1554,7 +1611,10 @@ mod tests {
         // Code before the opening `[[` on a prior line should be processed normally.
         let input = "x+=1\ns=[[\nhello\n]]\n";
         let out = preprocess_pico8(input);
-        assert!(out.contains("x = x + (1)"), "+= before [[ should be transformed");
+        assert!(
+            out.contains("x = x + (1)"),
+            "+= before [[ should be transformed"
+        );
         assert!(out.contains("s=[["));
         assert!(out.contains("hello"));
     }
@@ -1565,7 +1625,10 @@ mod tests {
         let input = "s = [[\nhello\n]] x+=1\n";
         let out = preprocess_pico8(input);
         assert!(out.contains("hello"));
-        assert!(out.contains("x = x + (1)"), "+= after ]] on same line should be transformed");
+        assert!(
+            out.contains("x = x + (1)"),
+            "+= after ]] on same line should be transformed"
+        );
     }
 
     #[test]
@@ -1573,8 +1636,14 @@ mod tests {
         // --[=[ ... ]=] multi-line comment with equals signs.
         let input = "--[=[\nx += 1\n]=]\ny+=1\n";
         let out = preprocess_pico8(input);
-        assert!(out.contains("x += 1"), "+= inside --[=[]=] should not be transformed");
-        assert!(out.contains("y = y + (1)"), "+= after ]=] should be transformed");
+        assert!(
+            out.contains("x += 1"),
+            "+= inside --[=[]=] should not be transformed"
+        );
+        assert!(
+            out.contains("y = y + (1)"),
+            "+= after ]=] should be transformed"
+        );
     }
 
     #[test]
@@ -1585,7 +1654,10 @@ mod tests {
         // ]] should not close [=[ -- "still inside" is still part of the string
         assert!(out.contains("still inside"));
         // y+=1 is after the proper ]=] close, so it should be transformed
-        assert!(out.contains("y = y + (1)"), "+= after ]=] should be transformed");
+        assert!(
+            out.contains("y = y + (1)"),
+            "+= after ]=] should be transformed"
+        );
     }
 
     // -------------------------------------------------------
@@ -1603,9 +1675,15 @@ mod tests {
         };
         let input = "#include utils.lua\nx=1\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("function util() end"), "included content should be present");
+        assert!(
+            out.contains("function util() end"),
+            "included content should be present"
+        );
         assert!(out.contains("x=1"), "code after include should be present");
-        assert!(!out.contains("#include"), "#include directive should be removed");
+        assert!(
+            !out.contains("#include"),
+            "#include directive should be removed"
+        );
     }
 
     #[test]
@@ -1613,7 +1691,10 @@ mod tests {
         let resolver = |_: &str| -> Option<String> { None };
         let input = "#include missing.lua\nx=1\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("-- #include not found: missing.lua"), "should emit not-found comment");
+        assert!(
+            out.contains("-- #include not found: missing.lua"),
+            "should emit not-found comment"
+        );
         assert!(out.contains("x=1"));
     }
 
@@ -1628,8 +1709,14 @@ mod tests {
         };
         let input = "#include a.lua\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("function a() end"), "a.lua content should be present");
-        assert!(out.contains("function b() end"), "b.lua content (included by a.lua) should be present");
+        assert!(
+            out.contains("function a() end"),
+            "a.lua content should be present"
+        );
+        assert!(
+            out.contains("function b() end"),
+            "b.lua content (included by a.lua) should be present"
+        );
     }
 
     #[test]
@@ -1643,9 +1730,18 @@ mod tests {
         };
         let input = "#include a.lua\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("function a() end"), "a.lua content should be present");
-        assert!(out.contains("function b() end"), "b.lua content should be present");
-        assert!(out.contains("-- #include cycle detected: a.lua"), "cycle should be detected");
+        assert!(
+            out.contains("function a() end"),
+            "a.lua content should be present"
+        );
+        assert!(
+            out.contains("function b() end"),
+            "b.lua content should be present"
+        );
+        assert!(
+            out.contains("-- #include cycle detected: a.lua"),
+            "cycle should be detected"
+        );
     }
 
     #[test]
@@ -1665,39 +1761,45 @@ mod tests {
         };
         let input = "#include file_0.lua\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("-- #include depth limit exceeded"), "depth limit should trigger");
+        assert!(
+            out.contains("-- #include depth limit exceeded"),
+            "depth limit should trigger"
+        );
     }
 
     #[test]
     fn test_include_inside_string_not_processed() {
-        let resolver = |_: &str| -> Option<String> {
-            Some("SHOULD NOT APPEAR\n".to_string())
-        };
+        let resolver = |_: &str| -> Option<String> { Some("SHOULD NOT APPEAR\n".to_string()) };
         let input = "x = \"#include utils.lua\"\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("\"#include utils.lua\""), "include inside string should be preserved");
+        assert!(
+            out.contains("\"#include utils.lua\""),
+            "include inside string should be preserved"
+        );
         assert!(!out.contains("SHOULD NOT APPEAR"));
     }
 
     #[test]
     fn test_include_inside_multiline_string_not_processed() {
-        let resolver = |_: &str| -> Option<String> {
-            Some("SHOULD NOT APPEAR\n".to_string())
-        };
+        let resolver = |_: &str| -> Option<String> { Some("SHOULD NOT APPEAR\n".to_string()) };
         let input = "x = [[\n#include utils.lua\n]]\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("#include utils.lua"), "include inside multiline string should be preserved");
+        assert!(
+            out.contains("#include utils.lua"),
+            "include inside multiline string should be preserved"
+        );
         assert!(!out.contains("SHOULD NOT APPEAR"));
     }
 
     #[test]
     fn test_include_inside_comment_not_processed() {
-        let resolver = |_: &str| -> Option<String> {
-            Some("SHOULD NOT APPEAR\n".to_string())
-        };
+        let resolver = |_: &str| -> Option<String> { Some("SHOULD NOT APPEAR\n".to_string()) };
         let input = "-- #include utils.lua\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("-- #include utils.lua"), "include inside comment should be preserved");
+        assert!(
+            out.contains("-- #include utils.lua"),
+            "include inside comment should be preserved"
+        );
         assert!(!out.contains("SHOULD NOT APPEAR"));
     }
 
@@ -1712,8 +1814,14 @@ mod tests {
         };
         let input = "#include ops.lua\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("x = x + (1)"), "+= in included file should be transformed");
-        assert!(out.contains("~="), "!= in included file should be transformed to ~=");
+        assert!(
+            out.contains("x = x + (1)"),
+            "+= in included file should be transformed"
+        );
+        assert!(
+            out.contains("~="),
+            "!= in included file should be transformed to ~="
+        );
     }
 
     #[test]
@@ -1727,7 +1835,10 @@ mod tests {
         };
         let input = "  #include utils.lua\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("function util() end"), "indented include should be resolved");
+        assert!(
+            out.contains("function util() end"),
+            "indented include should be resolved"
+        );
     }
 
     #[test]
@@ -1741,7 +1852,10 @@ mod tests {
         };
         let input = "#include \"helpers.lua\"\n";
         let out = preprocess_pico8_with_includes(input, &resolver);
-        assert!(out.contains("function help() end"), "quoted include should be resolved");
+        assert!(
+            out.contains("function help() end"),
+            "quoted include should be resolved"
+        );
     }
 
     #[test]

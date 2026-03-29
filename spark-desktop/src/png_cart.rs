@@ -57,7 +57,9 @@ pub fn parse_p8_png(png_bytes: &[u8]) -> Result<CartData, String> {
 /// 2 bits of each RGBA channel.
 fn extract_steganographic_data(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let decoder = png::Decoder::new(png_bytes);
-    let mut reader = decoder.read_info().map_err(|e| format!("PNG decode error: {}", e))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("PNG decode error: {}", e))?;
 
     // Copy dimensions before the mutable borrow in next_frame().
     let (width, height) = {
@@ -65,10 +67,7 @@ fn extract_steganographic_data(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
         (info.width, info.height)
     };
     if width != 128 || height != 128 {
-        return Err(format!(
-            "Expected 128x128 PNG, got {}x{}",
-            width, height
-        ));
+        return Err(format!("Expected 128x128 PNG, got {}x{}", width, height));
     }
 
     // Allocate a buffer large enough for one frame.
@@ -298,11 +297,17 @@ fn decode_code(raw: &[u8], cart: &mut CartData) -> Result<(), String> {
     } else if !code_data.is_empty() && code_data[0] == b':' {
         // Uncompressed code (starts with ':' but not ":c:\0")
         // Find the null terminator.
-        let end = code_data.iter().position(|&b| b == 0).unwrap_or(code_data.len());
+        let end = code_data
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(code_data.len());
         cart.code = String::from_utf8_lossy(&code_data[1..end]).into_owned();
     } else {
         // Possibly uncompressed or raw -- try to interpret as text.
-        let end = code_data.iter().position(|&b| b == 0).unwrap_or(code_data.len());
+        let end = code_data
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(code_data.len());
         if end == 0 {
             cart.code = String::new();
         } else {
@@ -363,13 +368,14 @@ fn decompress_code_new(data: &[u8]) -> Result<String, String> {
     let mut output: Vec<u8> = Vec::with_capacity(uncompressed_len);
 
     while output.len() < uncompressed_len {
-        let bit = reader.read_bits(1).ok_or("Unexpected end of compressed data")?;
+        let bit = reader
+            .read_bits(1)
+            .ok_or("Unexpected end of compressed data")?;
         if bit == 1 {
             // 1 + 4 bits: index into short table (entries 1-15)
             let idx = reader
                 .read_bits(4)
-                .ok_or("Unexpected end reading short char index")?
-                as usize;
+                .ok_or("Unexpected end reading short char index")? as usize;
             if idx < COMPRESS_CHAR_TABLE.len() {
                 output.push(COMPRESS_CHAR_TABLE[idx]);
             }
@@ -381,8 +387,7 @@ fn decompress_code_new(data: &[u8]) -> Result<String, String> {
                 // 00 + 8 bits: literal byte
                 let byte = reader
                     .read_bits(8)
-                    .ok_or("Unexpected end reading literal byte")?
-                    as u8;
+                    .ok_or("Unexpected end reading literal byte")? as u8;
                 output.push(byte);
             } else {
                 // 01 + 5 bits: extended table index or copy reference
@@ -427,8 +432,7 @@ fn decompress_code_new(data: &[u8]) -> Result<String, String> {
     }
 
     output.truncate(uncompressed_len);
-    String::from_utf8(output)
-        .map_err(|e| format!("Decompressed code is not valid UTF-8: {}", e))
+    String::from_utf8(output).map_err(|e| format!("Decompressed code is not valid UTF-8: {}", e))
 }
 
 /// Decompress code in the older format (header byte 0x00).
@@ -452,8 +456,7 @@ fn decompress_code_old(data: &[u8]) -> Result<String, String> {
     let compressed = &data[3..];
 
     // Old format character table: same characters used by PICO-8
-    let char_table: &[u8] =
-        b"#\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(){}[]<>+=/*:;.,~_";
+    let char_table: &[u8] = b"#\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(){}[]<>+=/*:;.,~_";
 
     let mut output: Vec<u8> = Vec::with_capacity(uncompressed_len);
     let mut i = 0;
@@ -492,8 +495,7 @@ fn decompress_code_old(data: &[u8]) -> Result<String, String> {
     }
 
     output.truncate(uncompressed_len);
-    String::from_utf8(output)
-        .map_err(|e| format!("Decompressed code is not valid UTF-8: {}", e))
+    String::from_utf8(output).map_err(|e| format!("Decompressed code is not valid UTF-8: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -550,7 +552,7 @@ mod tests {
         for i in 0..PNG_DATA_SIZE {
             let byte = pixels[i];
             // Encode: R low 2 bits = byte & 3, G low 2 = (byte >> 2) & 3, etc.
-            rgba[i * 4] = byte & 3;           // R
+            rgba[i * 4] = byte & 3; // R
             rgba[i * 4 + 1] = (byte >> 2) & 3; // G
             rgba[i * 4 + 2] = (byte >> 4) & 3; // B
             rgba[i * 4 + 3] = (byte >> 6) | 0xFC; // A (set high bits so alpha is mostly opaque)
@@ -675,10 +677,10 @@ mod tests {
         // SFX at offset 0x3200, 68 bytes per SFX
         let sfx_offset = 0x3200;
         // SFX 0: mode=0, speed=16, loop_start=4, loop_end=8
-        raw[sfx_offset] = 0;   // editor mode
+        raw[sfx_offset] = 0; // editor mode
         raw[sfx_offset + 1] = 16; // speed
-        raw[sfx_offset + 2] = 4;  // loop_start
-        raw[sfx_offset + 3] = 8;  // loop_end
+        raw[sfx_offset + 2] = 4; // loop_start
+        raw[sfx_offset + 3] = 8; // loop_end
 
         // Note 0: pitch=24 (0x18), waveform=3, volume=5, effect=2
         // Encoded: bits 0-5 = 24 = 0x18, bits 6-8 = 3, bits 9-11 = 5, bits 12-14 = 2
@@ -708,9 +710,9 @@ mod tests {
 
         // Pattern 0: loop start, channels 0=SFX 1, 1=SFX 2, 2=disabled, 3=SFX 5
         raw[music_offset] = 0x80 | 1; // bit 7 = loop start, SFX index 1
-        raw[music_offset + 1] = 2;    // SFX index 2
+        raw[music_offset + 1] = 2; // SFX index 2
         raw[music_offset + 2] = 0x40; // bit 6 = disabled
-        raw[music_offset + 3] = 5;    // SFX index 5
+        raw[music_offset + 3] = 5; // SFX index 5
 
         let mut cart = CartData::new();
         decode_music(&raw, &mut cart);
@@ -809,8 +811,8 @@ mod tests {
         let mut raw = vec![0u8; PNG_DATA_SIZE];
         let sfx_offset = 0x3200;
         raw[sfx_offset + 1] = 0xFF; // max speed
-        raw[sfx_offset + 2] = 31;   // max loop_start
-        raw[sfx_offset + 3] = 31;   // max loop_end
+        raw[sfx_offset + 2] = 31; // max loop_start
+        raw[sfx_offset + 3] = 31; // max loop_end
 
         // Note with max values: pitch=63, waveform=7, volume=7, effect=7
         let w: u16 = 63 | (7 << 6) | (7 << 9) | (7 << 12);

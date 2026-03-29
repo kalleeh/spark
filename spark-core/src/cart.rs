@@ -1,8 +1,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::audio::{Sfx, MusicPattern, Note, NUM_SFX, NUM_MUSIC, NOTES_PER_SFX};
-use crate::console::{SPRITE_SHEET_SIZE, MAP_SIZE};
+use crate::audio::{MusicPattern, Note, Sfx, NOTES_PER_SFX, NUM_MUSIC, NUM_SFX};
+use crate::console::{MAP_SIZE, SPRITE_SHEET_SIZE};
 
 /// All data parsed from a .p8 cart file.
 pub struct CartData {
@@ -10,7 +10,7 @@ pub struct CartData {
     pub sprites: [u8; SPRITE_SHEET_SIZE], // 128*128 pixel color indices (0-15)
     pub map: [u8; MAP_SIZE],              // 128*64 tile indices (0-255)
     pub flags: [u8; 256],                 // 256 sprite flags
-    pub sfx: [Sfx; NUM_SFX],             // 64 sound effects
+    pub sfx: [Sfx; NUM_SFX],              // 64 sound effects
     pub music: [MusicPattern; NUM_MUSIC], // 64 music patterns
 }
 
@@ -483,9 +483,9 @@ mod tests {
             ("00000", 0u8),
             ("10000", 1),
             ("f0000", 15),
-            ("00100", 16),  // c2 bit0=1
-            ("00010", 32),  // c3 bit0=1
-            ("00110", 48),  // c2+c3 bit0=1
+            ("00100", 16), // c2 bit0=1
+            ("00010", 32), // c3 bit0=1
+            ("00110", 48), // c2+c3 bit0=1
             ("f0110", 63),
         ];
 
@@ -670,7 +670,8 @@ mod tests {
             for ch in 0..4 {
                 assert_eq!(
                     cart2.music[i].channels[ch], cart.music[i].channels[ch],
-                    "music {} channel {}", i, ch
+                    "music {} channel {}",
+                    i, ch
                 );
             }
         }
@@ -700,7 +701,8 @@ mod tests {
             let cart2 = parse_cart(&text);
             assert_eq!(
                 cart2.sfx[0].notes[0].pitch, pitch,
-                "pitch {} failed roundtrip", pitch
+                "pitch {} failed roundtrip",
+                pitch
             );
         }
     }
@@ -719,7 +721,8 @@ mod tests {
             let cart2 = parse_cart(&text);
             assert_eq!(
                 cart2.sfx[0].notes[0].waveform, waveform,
-                "waveform {} failed roundtrip", waveform
+                "waveform {} failed roundtrip",
+                waveform
             );
         }
     }
@@ -738,7 +741,8 @@ mod tests {
             let cart2 = parse_cart(&text);
             assert_eq!(
                 cart2.sfx[0].notes[0].volume, volume,
-                "volume {} failed roundtrip", volume
+                "volume {} failed roundtrip",
+                volume
             );
         }
     }
@@ -757,7 +761,8 @@ mod tests {
             let cart2 = parse_cart(&text);
             assert_eq!(
                 cart2.sfx[0].notes[0].effect, effect,
-                "effect {} failed roundtrip", effect
+                "effect {} failed roundtrip",
+                effect
             );
         }
     }
@@ -812,19 +817,23 @@ mod tests {
         for n in 0..NOTES_PER_SFX {
             assert_eq!(
                 cart2.sfx[5].notes[n].pitch, cart.sfx[5].notes[n].pitch,
-                "sfx5 note {} pitch", n
+                "sfx5 note {} pitch",
+                n
             );
             assert_eq!(
                 cart2.sfx[5].notes[n].waveform, cart.sfx[5].notes[n].waveform,
-                "sfx5 note {} waveform", n
+                "sfx5 note {} waveform",
+                n
             );
             assert_eq!(
                 cart2.sfx[5].notes[n].volume, cart.sfx[5].notes[n].volume,
-                "sfx5 note {} volume", n
+                "sfx5 note {} volume",
+                n
             );
             assert_eq!(
                 cart2.sfx[5].notes[n].effect, cart.sfx[5].notes[n].effect,
-                "sfx5 note {} effect", n
+                "sfx5 note {} effect",
+                n
             );
         }
     }
@@ -835,7 +844,12 @@ mod tests {
         let sfx = Sfx::default();
         let mut line = String::new();
         serialize_sfx_line(&sfx, &mut line);
-        assert_eq!(line.len(), 168, "SFX line should be 168 chars, got {}", line.len());
+        assert_eq!(
+            line.len(),
+            168,
+            "SFX line should be 168 chars, got {}",
+            line.len()
+        );
     }
 
     #[test]
@@ -860,12 +874,14 @@ mod tests {
         for i in 0..3 {
             assert_eq!(
                 cart2.music[i].flags, cart.music[i].flags,
-                "music {} flags", i
+                "music {} flags",
+                i
             );
             for ch in 0..4 {
                 assert_eq!(
                     cart2.music[i].channels[ch], cart.music[i].channels[ch],
-                    "music {} channel {}", i, ch
+                    "music {} channel {}",
+                    i, ch
                 );
             }
         }
@@ -894,7 +910,7 @@ mod tests {
         cart.sprites[0] = 1;
         cart.sprites[1] = 15;
         cart.sprites[127] = 8;
-        cart.sprites[128] = 7;      // row 1, col 0
+        cart.sprites[128] = 7; // row 1, col 0
         cart.sprites[128 * 64] = 12; // row 64, col 0
         cart.sprites[128 * 127 + 127] = 5; // last pixel
 
@@ -912,7 +928,8 @@ mod tests {
         for i in 0..SPRITE_SHEET_SIZE {
             assert_eq!(
                 cart2.sprites[i], cart.sprites[i],
-                "sprite pixel {} mismatch", i
+                "sprite pixel {} mismatch",
+                i
             );
         }
     }
@@ -928,7 +945,13 @@ mod tests {
         let gfx_lines: Vec<&str> = gfx_section.lines().collect();
         assert_eq!(gfx_lines.len(), 128, "gfx should have 128 lines");
         for (i, line) in gfx_lines.iter().enumerate() {
-            assert_eq!(line.len(), 128, "gfx line {} should be 128 chars, got {}", i, line.len());
+            assert_eq!(
+                line.len(),
+                128,
+                "gfx line {} should be 128 chars, got {}",
+                i,
+                line.len()
+            );
         }
     }
 
@@ -939,8 +962,8 @@ mod tests {
         cart.map[0] = 0x21;
         cart.map[1] = 0xFF;
         cart.map[127] = 0xAB;
-        cart.map[128] = 0x42;        // row 1, col 0
-        cart.map[128 * 32] = 0x10;   // row 32, col 0
+        cart.map[128] = 0x42; // row 1, col 0
+        cart.map[128 * 32] = 0x10; // row 32, col 0
         cart.map[128 * 63 + 127] = 0xCD; // last tile
 
         let text = serialize_cart(&cart);
@@ -955,10 +978,7 @@ mod tests {
 
         // Verify all tiles match
         for i in 0..MAP_SIZE {
-            assert_eq!(
-                cart2.map[i], cart.map[i],
-                "map tile {} mismatch", i
-            );
+            assert_eq!(cart2.map[i], cart.map[i], "map tile {} mismatch", i);
         }
     }
 
@@ -972,7 +992,13 @@ mod tests {
         let map_lines: Vec<&str> = map_section.lines().collect();
         assert_eq!(map_lines.len(), 64, "map should have 64 lines");
         for (i, line) in map_lines.iter().enumerate() {
-            assert_eq!(line.len(), 256, "map line {} should be 256 chars, got {}", i, line.len());
+            assert_eq!(
+                line.len(),
+                256,
+                "map line {} should be 256 chars, got {}",
+                i,
+                line.len()
+            );
         }
     }
 
@@ -1070,35 +1096,52 @@ mod tests {
         // Verify SFX
         for s in 0..NUM_SFX {
             assert_eq!(cart2.sfx[s].speed, cart.sfx[s].speed, "sfx {} speed", s);
-            assert_eq!(cart2.sfx[s].loop_start, cart.sfx[s].loop_start, "sfx {} loop_start", s);
-            assert_eq!(cart2.sfx[s].loop_end, cart.sfx[s].loop_end, "sfx {} loop_end", s);
+            assert_eq!(
+                cart2.sfx[s].loop_start, cart.sfx[s].loop_start,
+                "sfx {} loop_start",
+                s
+            );
+            assert_eq!(
+                cart2.sfx[s].loop_end, cart.sfx[s].loop_end,
+                "sfx {} loop_end",
+                s
+            );
             for n in 0..NOTES_PER_SFX {
                 assert_eq!(
                     cart2.sfx[s].notes[n].pitch, cart.sfx[s].notes[n].pitch,
-                    "sfx {} note {} pitch", s, n
+                    "sfx {} note {} pitch",
+                    s, n
                 );
                 assert_eq!(
                     cart2.sfx[s].notes[n].waveform, cart.sfx[s].notes[n].waveform,
-                    "sfx {} note {} waveform", s, n
+                    "sfx {} note {} waveform",
+                    s, n
                 );
                 assert_eq!(
                     cart2.sfx[s].notes[n].volume, cart.sfx[s].notes[n].volume,
-                    "sfx {} note {} volume", s, n
+                    "sfx {} note {} volume",
+                    s, n
                 );
                 assert_eq!(
                     cart2.sfx[s].notes[n].effect, cart.sfx[s].notes[n].effect,
-                    "sfx {} note {} effect", s, n
+                    "sfx {} note {} effect",
+                    s, n
                 );
             }
         }
 
         // Verify music
         for m in 0..NUM_MUSIC {
-            assert_eq!(cart2.music[m].flags, cart.music[m].flags, "music {} flags", m);
+            assert_eq!(
+                cart2.music[m].flags, cart.music[m].flags,
+                "music {} flags",
+                m
+            );
             for ch in 0..4 {
                 assert_eq!(
                     cart2.music[m].channels[ch], cart.music[m].channels[ch],
-                    "music {} channel {}", m, ch
+                    "music {} channel {}",
+                    m, ch
                 );
             }
         }
@@ -1132,35 +1175,52 @@ mod tests {
         // SFX
         for s in 0..NUM_SFX {
             assert_eq!(cart2.sfx[s].speed, cart.sfx[s].speed, "sfx {} speed", s);
-            assert_eq!(cart2.sfx[s].loop_start, cart.sfx[s].loop_start, "sfx {} loop_start", s);
-            assert_eq!(cart2.sfx[s].loop_end, cart.sfx[s].loop_end, "sfx {} loop_end", s);
+            assert_eq!(
+                cart2.sfx[s].loop_start, cart.sfx[s].loop_start,
+                "sfx {} loop_start",
+                s
+            );
+            assert_eq!(
+                cart2.sfx[s].loop_end, cart.sfx[s].loop_end,
+                "sfx {} loop_end",
+                s
+            );
             for n in 0..NOTES_PER_SFX {
                 assert_eq!(
                     cart2.sfx[s].notes[n].pitch, cart.sfx[s].notes[n].pitch,
-                    "sfx {} note {} pitch", s, n
+                    "sfx {} note {} pitch",
+                    s, n
                 );
                 assert_eq!(
                     cart2.sfx[s].notes[n].waveform, cart.sfx[s].notes[n].waveform,
-                    "sfx {} note {} waveform", s, n
+                    "sfx {} note {} waveform",
+                    s, n
                 );
                 assert_eq!(
                     cart2.sfx[s].notes[n].volume, cart.sfx[s].notes[n].volume,
-                    "sfx {} note {} volume", s, n
+                    "sfx {} note {} volume",
+                    s, n
                 );
                 assert_eq!(
                     cart2.sfx[s].notes[n].effect, cart.sfx[s].notes[n].effect,
-                    "sfx {} note {} effect", s, n
+                    "sfx {} note {} effect",
+                    s, n
                 );
             }
         }
 
         // Music
         for m in 0..NUM_MUSIC {
-            assert_eq!(cart2.music[m].flags, cart.music[m].flags, "music {} flags", m);
+            assert_eq!(
+                cart2.music[m].flags, cart.music[m].flags,
+                "music {} flags",
+                m
+            );
             for ch in 0..4 {
                 assert_eq!(
                     cart2.music[m].channels[ch], cart.music[m].channels[ch],
-                    "music {} channel {}", m, ch
+                    "music {} channel {}",
+                    m, ch
                 );
             }
         }
@@ -1177,7 +1237,10 @@ mod tests {
         cart.map[100] = 0x21;
         cart.sfx[3].speed = 20;
         cart.sfx[3].notes[0] = Note {
-            pitch: 36, waveform: 2, volume: 6, effect: 1,
+            pitch: 36,
+            waveform: 2,
+            volume: 6,
+            effect: 1,
         };
         cart.music[0] = MusicPattern {
             flags: 1,
@@ -1188,6 +1251,9 @@ mod tests {
         let cart2 = parse_cart(&text1);
         let text2 = serialize_cart(&cart2);
 
-        assert_eq!(text1, text2, "double round-trip should produce identical output");
+        assert_eq!(
+            text1, text2,
+            "double round-trip should produce identical output"
+        );
     }
 }
