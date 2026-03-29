@@ -27,6 +27,12 @@ impl CartData {
     }
 }
 
+impl Default for CartData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
@@ -238,11 +244,9 @@ fn parse_music_line(line: &str, pat: &mut MusicPattern) {
     let mut hex_buf = [0u8; 16];
     let mut len = 0;
     for b in line.bytes() {
-        if !b.is_ascii_whitespace() {
-            if len < hex_buf.len() {
-                hex_buf[len] = b;
-                len += 1;
-            }
+        if !b.is_ascii_whitespace() && len < hex_buf.len() {
+            hex_buf[len] = b;
+            len += 1;
         }
     }
 

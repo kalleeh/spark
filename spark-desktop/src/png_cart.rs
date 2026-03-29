@@ -346,10 +346,10 @@ const COMPRESS_CHAR_TABLE: &[u8] = b"\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(
 ///        - If 0 (so pattern 00): read 8 bits => literal byte. Output it.
 ///        - If 1 (so pattern 01): read 5 bits => n (0-31).
 ///          If n < length(COMPRESS_CHAR_TABLE): output COMPRESS_CHAR_TABLE[n].
-///          Otherwise this is a copy reference:
-///            read 4 more bits => offset high
-///            let offset_bits = (n - 59) * 16 + offset_high
-///            ...actually this gets complex with the copy offsets.
+///          Otherwise this is a copy reference.
+///
+///   read 4 more bits => offset high, let offset_bits = (n - 59) * 16 + offset_high.
+///   This gets complex with the copy offsets.
 ///
 /// The actual algorithm based on careful reverse-engineering:
 fn decompress_code_new(data: &[u8]) -> Result<String, String> {
@@ -413,9 +413,7 @@ fn decompress_code_new(data: &[u8]) -> Result<String, String> {
 
                     if copy_offset > output.len() {
                         // Invalid back-reference; output spaces as fallback
-                        for _ in 0..copy_len {
-                            output.push(b' ');
-                        }
+                        output.extend(std::iter::repeat_n(b' ', copy_len));
                     } else {
                         let start = output.len() - copy_offset;
                         for j in 0..copy_len {
@@ -482,9 +480,7 @@ fn decompress_code_old(data: &[u8]) -> Result<String, String> {
             let length = (b as usize) - 0x3B;
 
             if offset > output.len() {
-                for _ in 0..length {
-                    output.push(b' ');
-                }
+                output.extend(std::iter::repeat_n(b' ', length));
             } else {
                 let start = output.len() - offset;
                 for j in 0..length {

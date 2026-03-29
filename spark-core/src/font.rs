@@ -6,7 +6,6 @@
 ///
 /// Covers ASCII 32 (space) through ASCII 127 (DEL) — 96 glyphs total.
 /// This is an original font design, not a copy of PICO-8's built-in font.
-
 /// Character cell width in pixels (4 columns of glyph data + 1 column spacing).
 pub const CHAR_W: i32 = 5;
 

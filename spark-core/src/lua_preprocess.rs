@@ -327,9 +327,9 @@ fn process_line_normal(line: &str) -> String {
     let trimmed = line.trim();
 
     // ?expr  ->  print(expr)
-    if trimmed.starts_with('?') {
+    if let Some(stripped) = trimmed.strip_prefix('?') {
         let indent = &line[..line.len() - line.trim_start().len()];
-        let expr = trimmed[1..].trim();
+        let expr = stripped.trim();
         let mut out = String::new();
         out.push_str(indent);
         out.push_str("print(");
@@ -745,8 +745,8 @@ fn replace_outside_strings(line: &str, pattern: &str, replacement: &str) -> Stri
             i += 1;
         } else if chars[i] == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
             // Rest of line is a comment
-            for j in i..chars.len() {
-                result.push(chars[j]);
+            for ch in chars.iter().skip(i) {
+                result.push(*ch);
             }
             return result;
         } else if i + pat_chars.len() <= chars.len()
@@ -861,9 +861,7 @@ fn extract_lvalue_backwards(built: &str) -> Option<(String, usize)> {
             } else {
                 break;
             }
-        } else if bracket_depth > 0 {
-            start -= 1;
-        } else if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == ':' {
+        } else if bracket_depth > 0 || ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == ':' {
             start -= 1;
         } else {
             break;

@@ -330,7 +330,10 @@ async fn main() {
                     // Set app data for Lua callbacks
                     l.set_app_data(console);
                     l.set_app_data(audio);
-                    l.set_app_data(game_state.take().unwrap_or_else(GameState::new));
+                    let mut gs = game_state.take().unwrap_or_default();
+                    gs.actual_fps = macroquad::time::get_fps() as f32;
+                    gs.target_fps = if use_60fps { 60 } else { 30 };
+                    l.set_app_data(gs);
 
                     // Call _update or _update60 (increments frame_count) and _draw
                     let update_result = if use_60fps {
@@ -340,7 +343,7 @@ async fn main() {
                     };
 
                     // Check for load() / stop() / run() signals in update errors
-                    let mut load_request: Option<(String, String)> = None;
+                    let mut load_request: Option<(String, String, String)> = None;
                     let mut stop_requested = false;
                     let mut run_requested = false;
                     if let Err(e) = update_result {
@@ -453,8 +456,8 @@ async fn main() {
                     }
 
                     // Handle load() request: tear down current state and load new cart
-                    if let Some((ref filename, ref breadcrumb)) = load_request {
-                        eprintln!("[spark] load() requested: {:?} breadcrumb={:?}", filename, breadcrumb);
+                    if let Some((ref filename, ref breadcrumb, ref param)) = load_request {
+                        eprintln!("[spark] load() requested: {:?} breadcrumb={:?} param={:?}", filename, breadcrumb, param);
 
                         // Resolve path relative to current cart's directory
                         let resolved_path = if let Some(ref current) = cart_path {
@@ -496,6 +499,7 @@ async fn main() {
                                         let gs = GameState::new();
                                         new_l.set_app_data(gs);
                                         new_l.set_app_data(lua_api::Breadcrumb(breadcrumb.clone()));
+                                        new_l.set_app_data(lua_api::LoadParam(param.clone()));
 
                                         match lua_api::load_code(&new_l, &cart_data.code) {
                                             Ok(()) => {

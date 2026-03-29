@@ -147,8 +147,8 @@ fn cursor_to_line_col(cursor_pos: usize, lines: &[&str]) -> (usize, usize) {
 fn line_col_to_pos(lines: &[&str], line: usize, col: usize, code_len: usize) -> usize {
     let line = line.min(lines.len().saturating_sub(1));
     let mut pos: usize = 0;
-    for i in 0..line {
-        pos += lines[i].len() + 1;
+    for l in lines.iter().take(line) {
+        pos += l.len() + 1;
     }
     let max_col = lines.get(line).map_or(0, |l| l.len());
     pos += col.min(max_col);
@@ -170,16 +170,14 @@ fn sprite_origin(sprite_idx: u8) -> (i32, i32) {
 /// Convert mouse coordinates in the zoomed sprite view to 8x8 pixel coordinates.
 /// Returns `None` if the mouse is outside the zoomed view area.
 fn zoom_to_sprite_pixel(mouse_x: i32, mouse_y: i32) -> Option<(i32, i32)> {
-    if mouse_x < SPR_ZOOM_X
-        || mouse_x >= SPR_ZOOM_X + SPR_ZOOM_SIZE
-        || mouse_y < SPR_ZOOM_Y
-        || mouse_y >= SPR_ZOOM_Y + SPR_ZOOM_SIZE
+    if !(SPR_ZOOM_X..SPR_ZOOM_X + SPR_ZOOM_SIZE).contains(&mouse_x)
+        || !(SPR_ZOOM_Y..SPR_ZOOM_Y + SPR_ZOOM_SIZE).contains(&mouse_y)
     {
         return None;
     }
     let px = (mouse_x - SPR_ZOOM_X) / SPR_ZOOM;
     let py = (mouse_y - SPR_ZOOM_Y) / SPR_ZOOM;
-    if px >= 0 && px < 8 && py >= 0 && py < 8 {
+    if (0..8).contains(&px) && (0..8).contains(&py) {
         Some((px, py))
     } else {
         None
@@ -210,7 +208,7 @@ fn sheet_click_to_sprite(mouse_x: i32, mouse_y: i32, page: usize) -> Option<u8> 
 /// Convert a click on the color palette bar to a color index (0-15).
 /// Returns `None` if the click is outside the palette area.
 fn palette_click_to_color(mouse_x: i32, mouse_y: i32) -> Option<u8> {
-    if mouse_y < PAL_Y || mouse_y >= PAL_Y + PAL_SWATCH || mouse_x < 0 || mouse_x >= 128 {
+    if !(PAL_Y..PAL_Y + PAL_SWATCH).contains(&mouse_y) || !(0..128).contains(&mouse_x) {
         return None;
     }
     let c = (mouse_x / PAL_SWATCH) as u8;
@@ -250,7 +248,7 @@ fn map_view_to_tile(
     let row = (mouse_y - MAP_VIEW_Y) / 8;
     let map_x = scroll_x + col;
     let map_y = scroll_y + row;
-    if map_x >= 0 && map_x < 128 && map_y >= 0 && map_y < 64 {
+    if (0..128).contains(&map_x) && (0..64).contains(&map_y) {
         Some((map_x, map_y))
     } else {
         None
@@ -264,17 +262,15 @@ fn map_view_to_tile(
 /// Convert a pitch value (0-63) to a Y pixel coordinate within the piano roll area.
 /// Pitch 0 is at the bottom, pitch 63 is at the top.
 fn sfx_pitch_to_y(pitch: u8) -> i32 {
-    let clamped = (pitch as i32).min(63).max(0);
+    let clamped = (pitch as i32).clamp(0, 63);
     SFX_ROLL_Y + SFX_ROLL_H - 1 - (clamped * SFX_ROLL_H / 64)
 }
 
 /// Convert a click in the SFX piano roll area to a (note_index, pitch) pair.
 /// Returns None if the click is outside the piano roll area.
 fn sfx_click_to_note(mouse_x: i32, mouse_y: i32) -> Option<(usize, u8)> {
-    if mouse_x < SFX_ROLL_X
-        || mouse_x >= SFX_ROLL_X + SFX_ROLL_W
-        || mouse_y < SFX_ROLL_Y
-        || mouse_y >= SFX_ROLL_Y + SFX_ROLL_H
+    if !(SFX_ROLL_X..SFX_ROLL_X + SFX_ROLL_W).contains(&mouse_x)
+        || !(SFX_ROLL_Y..SFX_ROLL_Y + SFX_ROLL_H).contains(&mouse_y)
     {
         return None;
     }
@@ -318,7 +314,7 @@ fn selection_range(sel_start: usize, cursor_pos: usize) -> (usize, usize) {
 }
 
 /// Extract the selected text from a code string given a selection range.
-fn selected_text<'a>(code: &'a str, sel_start: usize, cursor_pos: usize) -> &'a str {
+fn selected_text(code: &str, sel_start: usize, cursor_pos: usize) -> &str {
     let (lo, hi) = selection_range(sel_start, cursor_pos);
     let lo = lo.min(code.len());
     let hi = hi.min(code.len());
@@ -994,8 +990,8 @@ impl Editor {
 
                 // Compute the byte offset of this line's start in the code
                 let mut line_byte_start: usize = 0;
-                for li in 0..line_idx {
-                    line_byte_start += lines[li].len() + 1;
+                for li in lines.iter().take(line_idx) {
+                    line_byte_start += li.len() + 1;
                 }
                 let line_byte_end = line_byte_start + line.len();
 
@@ -1003,14 +999,10 @@ impl Editor {
                 if let Some((sel_lo, sel_hi)) = sel_range {
                     if sel_lo < sel_hi && sel_lo < line_byte_end + 1 && sel_hi > line_byte_start {
                         // Selection overlaps this line
-                        let col_start = if sel_lo <= line_byte_start {
-                            0
-                        } else {
-                            sel_lo - line_byte_start
-                        };
+                        let col_start = sel_lo.saturating_sub(line_byte_start);
                         // If selection extends past the end of line text, include
                         // the newline character visually (extend by 1 col)
-                        let col_end = if sel_hi >= line_byte_end + 1 {
+                        let col_end = if sel_hi > line_byte_end {
                             line.len() + 1
                         } else if sel_hi >= line_byte_end {
                             line.len()
@@ -1033,11 +1025,7 @@ impl Editor {
                         let match_end = match_offset + search_query_len;
                         // Check if this match overlaps with this line
                         if match_offset < line_byte_end && match_end > line_byte_start {
-                            let col_start = if match_offset <= line_byte_start {
-                                0
-                            } else {
-                                match_offset - line_byte_start
-                            };
+                            let col_start = match_offset.saturating_sub(line_byte_start);
                             let col_end = if match_end >= line_byte_end {
                                 line.len()
                             } else {
@@ -1177,7 +1165,7 @@ impl Editor {
         let frac = (since as f32 / REPEAT_RAMP as f32).min(1.0);
         let interval = REPEAT_SLOW as f32 - (REPEAT_SLOW as f32 - REPEAT_FAST as f32) * frac;
         let interval = (interval.round() as u32).max(1);
-        since % interval == 0
+        since.is_multiple_of(interval)
     }
 
     // -----------------------------------------------------------------------
@@ -1259,8 +1247,8 @@ impl Editor {
         // Compute byte range to delete: start of line to start of next line
         // (including the trailing newline if present).
         let mut line_start: usize = 0;
-        for i in 0..line_idx {
-            line_start += lines[i].len() + 1;
+        for li in lines.iter().take(line_idx) {
+            line_start += li.len() + 1;
         }
         let line_text_len = lines.get(line_idx).map_or(0, |l| l.len());
         let mut line_end = line_start + line_text_len;
@@ -1270,7 +1258,7 @@ impl Editor {
         } else if line_start > 0 {
             // If this is the last line (no trailing newline), remove
             // the preceding newline instead to avoid a trailing empty line.
-            line_start -= 1;
+            line_start = line_start.saturating_sub(1);
         }
         self.code.drain(line_start..line_end);
         self.cursor_pos = line_start.min(self.code.len());
@@ -1288,8 +1276,8 @@ impl Editor {
         let lines = split_lines(&self.code);
         let (line_idx, _) = cursor_to_line_col(self.cursor_pos, &lines);
         let mut insert_pos: usize = 0;
-        for i in 0..=line_idx {
-            insert_pos += lines[i].len() + 1;
+        for li in lines.iter().take(line_idx + 1) {
+            insert_pos += li.len() + 1;
         }
         // Clamp in case we are on the last line without trailing newline
         if insert_pos > self.code.len() {
@@ -1380,7 +1368,7 @@ impl Editor {
         // Type characters into query
         let mut changed = false;
         while let Some(ch) = get_char_pressed() {
-            if ch >= ' ' && ch <= '~' {
+            if (' '..='~').contains(&ch) {
                 self.search_query.push(ch);
                 changed = true;
             }
@@ -1673,7 +1661,7 @@ impl Editor {
                 if nav_key {
                     continue;
                 }
-                if ch >= ' ' && ch <= '~' {
+                if (' '..='~').contains(&ch) {
                     if !inserted {
                         self.delete_selection_if_active();
                         self.push_undo_if_changed();
@@ -1924,7 +1912,7 @@ impl Editor {
             for col in 0..MAP_COLS as i32 {
                 let map_x = self.map_scroll_x + col;
                 let map_y = self.map_scroll_y + row;
-                if map_x < 0 || map_x >= 128 || map_y < 0 || map_y >= 64 {
+                if !(0..128).contains(&map_x) || !(0..64).contains(&map_y) {
                     continue;
                 }
                 let tile = console.mget(map_x, map_y);
@@ -2129,7 +2117,7 @@ impl Editor {
         // Draw horizontal grid lines at each octave (every 12 semitones)
         for octave_pitch in (0..64).step_by(12) {
             let y = sfx_pitch_to_y(octave_pitch);
-            if y >= SFX_ROLL_Y && y < SFX_ROLL_Y + SFX_ROLL_H {
+            if (SFX_ROLL_Y..SFX_ROLL_Y + SFX_ROLL_H).contains(&y) {
                 for x in SFX_ROLL_X..SFX_ROLL_X + SFX_ROLL_W {
                     console.raw_pset(x, y, 2);
                 }
@@ -2334,9 +2322,9 @@ impl Editor {
             console.print(&label, Some(1), Some(detail_y), Some(7));
 
             // Channel editors with +/- buttons
-            for ch in 0..4_usize {
+            for (ch, &ch_byte_val) in pat_channels.iter().enumerate() {
                 let cy = detail_y + 8 + ch as i32 * 8;
-                let ch_byte = pat_channels[ch];
+                let ch_byte = ch_byte_val;
                 let enabled = (ch_byte & 0x40) == 0;
                 let sfx_idx = ch_byte & 0x3F;
 

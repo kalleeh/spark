@@ -44,7 +44,7 @@ impl Waveform {
 // ---------------------------------------------------------------------------
 
 /// A single note inside a sound effect.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Note {
     /// Pitch value 0-63 (C-0 = 0, C#-0 = 1, ... C-1 = 12, ...).
     pub pitch: u8,
@@ -53,19 +53,8 @@ pub struct Note {
     /// Volume 0-7.
     pub volume: u8,
     /// Effect 0-7 (0=none, 1=slide, 2=vibrato, 3=drop, 4=fade_in,
-    ///              5=fade_out, 6=arpeggio_fast, 7=arpeggio_slow).
+    ///   5=fade_out, 6=arpeggio_fast, 7=arpeggio_slow).
     pub effect: u8,
-}
-
-impl Default for Note {
-    fn default() -> Self {
-        Note {
-            pitch: 0,
-            waveform: 0,
-            volume: 0,
-            effect: 0,
-        }
-    }
 }
 
 /// A sound effect consisting of 32 notes.
@@ -218,7 +207,15 @@ impl Audio {
             frame_counter: 0,
         }
     }
+}
 
+impl Default for Audio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Audio {
     // -----------------------------------------------------------------------
     // SFX trigger
     // -----------------------------------------------------------------------
@@ -227,7 +224,7 @@ impl Audio {
     ///
     /// * `n`       — SFX index 0-63. -1 = stop `channel`, -2 = stop all.
     /// * `channel` — Channel 0-3 to play on. -1 = auto-assign to the first
-    ///               free channel, or steal the oldest one.
+    ///   free channel, or steal the oldest one.
     /// * `offset`  — Starting note (0-31).
     /// * `length`  — Number of notes to play. 0 or negative = all remaining.
     pub fn sfx(&mut self, n: i32, channel: i32, offset: i32, length: i32) {
@@ -531,7 +528,7 @@ impl Audio {
     /// `buf`         — output buffer; every element is overwritten with a sample
     ///                 in the range [-1.0, 1.0].
     pub fn generate_samples(&mut self, sample_rate: u32, buf: &mut [f32]) {
-        for s in 0..buf.len() {
+        for sample in &mut *buf {
             let mut mix: f64 = 0.0;
 
             for ch in 0..NUM_CHANNELS {
@@ -609,7 +606,7 @@ impl Audio {
                 }
             }
 
-            buf[s] = mix.clamp(-1.0, 1.0) as f32;
+            *sample = mix.clamp(-1.0, 1.0) as f32;
         }
 
         // Remove finished channels

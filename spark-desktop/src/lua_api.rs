@@ -3,6 +3,9 @@
 //! Registers all PICO-8 compatible Lua functions against an `mlua::Lua` state.
 //! Console and Audio state are shared via `Lua::set_app_data` / `app_data_mut`.
 
+// mlua::MultiValue does not implement slice methods, so .get(0) is the correct idiom.
+#![allow(clippy::get_first)]
+
 use mlua::prelude::*;
 use std::f64::consts::TAU;
 
@@ -36,9 +39,14 @@ pub struct Breadcrumb(pub String);
 #[derive(Clone, Default)]
 pub struct CartDataId(pub String);
 
+/// The param string passed as the third argument to load().
+/// Accessible via stat(46).
+#[derive(Clone, Default)]
+pub struct LoadParam(pub String);
+
 /// Parse a load-cart signal error message.
 ///
-/// If `msg` contains the `LOAD_CART_PREFIX`, returns `Some((filename, breadcrumb))`.
+/// If `msg` contains the `LOAD_CART_PREFIX`, returns `Some((filename, breadcrumb, param))`.
 /// Otherwise returns `None`.
 /// Returns true if `msg` contains the stop-cart signal.
 pub fn is_stop_signal(msg: &str) -> bool {
@@ -89,19 +97,44 @@ pub fn load_cartdata(id: &str) -> [f64; 64] {
     data
 }
 
-pub fn parse_load_signal(msg: &str) -> Option<(String, String)> {
+pub fn parse_load_signal(msg: &str) -> Option<(String, String, String)> {
     if let Some(rest) = msg.split(LOAD_CART_PREFIX).nth(1) {
         // Find the first occurrence of the prefix payload (it may be wrapped
         // in additional error context by mlua).  The payload format is:
-        //   filename|breadcrumb
-        // where breadcrumb may be empty.
+        //   filename|breadcrumb|param
+        // where breadcrumb and param may be empty.
         let payload = rest.lines().next().unwrap_or(rest);
-        let mut parts = payload.splitn(2, '|');
+        let mut parts = payload.splitn(3, '|');
         let filename = parts.next().unwrap_or("").to_string();
         let breadcrumb = parts.next().unwrap_or("").to_string();
-        Some((filename, breadcrumb))
+        let param = parts.next().unwrap_or("").to_string();
+        Some((filename, breadcrumb, param))
     } else {
         None
+    }
+}
+
+/// Write a 128x128 RGBA screen buffer to a PNG file at `path`.
+fn write_screen_png(rgba: &[u8], path: &str) {
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, 128, 128);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    match encoder.write_header() {
+        Ok(mut writer) => {
+            if let Err(e) = writer.write_image_data(rgba) {
+                eprintln!("[extcmd screenshot] write_image_data failed: {}", e);
+                return;
+            }
+        }
+        Err(e) => {
+            eprintln!("[extcmd screenshot] write_header failed: {}", e);
+            return;
+        }
+    }
+    match std::fs::write(path, &bytes) {
+        Ok(()) => eprintln!("[extcmd screenshot] saved {}", path),
+        Err(e) => eprintln!("[extcmd screenshot] failed to write {}: {}", path, e),
     }
 }
 
@@ -193,10 +226,11 @@ macro_rules! get_audio_ref {
 pub fn create_lua() -> LuaResult<Lua> {
     let lua = Lua::new();
 
-    // Insert initial GameState, Breadcrumb, and CartDataId
+    // Insert initial GameState, Breadcrumb, CartDataId, and LoadParam
     lua.set_app_data(GameState::new());
     lua.set_app_data(Breadcrumb::default());
     lua.set_app_data(CartDataId::default());
+    lua.set_app_data(LoadParam::default());
 
     // Register every function into the Lua globals table.
     register_graphics(&lua)?;
@@ -230,18 +264,18 @@ pub fn load_code(lua: &Lua, code: &str) -> LuaResult<()> {
                 }
             }
             if let Some(line_num) = found_line {
-                let start = if line_num > 5 { line_num - 5 } else { 0 };
+                let start = line_num.saturating_sub(5);
                 let end = (line_num + 5).min(lines.len());
                 eprintln!("--- Context around line {} (total {} lines) ---", line_num, lines.len());
-                for i in start..end {
+                for (i, line_text) in lines.iter().enumerate().take(end).skip(start) {
                     let marker = if i + 1 == line_num { ">>>" } else { "   " };
-                    eprintln!("{} {:4}: {}", marker, i + 1, lines[i]);
+                    eprintln!("{} {:4}: {}", marker, i + 1, line_text);
                 }
                 eprintln!("---");
             }
             eprintln!("--- Full preprocessed code (lines 550-570) ---");
             for (i, line) in lines.iter().enumerate() {
-                if i >= 549 && i < 570 {
+                if (549..570).contains(&i) {
                     eprintln!("{:4}: {}", i + 1, line);
                 }
             }
@@ -434,8 +468,8 @@ fn register_graphics(lua: &Lua) -> LuaResult<()> {
         let y = args.get(2).and_then(val_to_i32).unwrap_or(0);
         let w = args.get(3).and_then(val_to_f64).unwrap_or(1.0);
         let h = args.get(4).and_then(val_to_f64).unwrap_or(1.0);
-        let flip_x = args.get(5).map_or(false, val_to_bool);
-        let flip_y = args.get(6).map_or(false, val_to_bool);
+        let flip_x = args.get(5).is_some_and(val_to_bool);
+        let flip_y = args.get(6).is_some_and(val_to_bool);
         let mut con = get_console_mut!(lua)?;
         con.spr(n, x, y, w, h, flip_x, flip_y);
         Ok(())
@@ -450,8 +484,8 @@ fn register_graphics(lua: &Lua) -> LuaResult<()> {
         let dy = args.get(5).and_then(val_to_i32).unwrap_or(0);
         let dw = args.get(6).and_then(val_to_i32).unwrap_or(sw);
         let dh = args.get(7).and_then(val_to_i32).unwrap_or(sh);
-        let flip_x = args.get(8).map_or(false, val_to_bool);
-        let flip_y = args.get(9).map_or(false, val_to_bool);
+        let flip_x = args.get(8).is_some_and(val_to_bool);
+        let flip_y = args.get(9).is_some_and(val_to_bool);
         let mut con = get_console_mut!(lua)?;
         con.sspr(sx, sy, sw, sh, dx, dy, dw, dh, flip_x, flip_y);
         Ok(())
@@ -505,7 +539,7 @@ fn register_graphics(lua: &Lua) -> LuaResult<()> {
 
     globals.set("clip", lua.create_function(|lua, args: LuaMultiValue| {
         let mut con = get_console_mut!(lua)?;
-        if args.is_empty() || args.get(0).map_or(true, |v| matches!(v, LuaValue::Nil)) {
+        if args.is_empty() || args.get(0).is_none_or(|v| matches!(v, LuaValue::Nil)) {
             con.clip_rect(0, 0, 128, 128);
         } else {
             let x = args.get(0).and_then(val_to_i32).unwrap_or(0);
@@ -519,7 +553,7 @@ fn register_graphics(lua: &Lua) -> LuaResult<()> {
 
     globals.set("pal", lua.create_function(|lua, args: LuaMultiValue| {
         let mut con = get_console_mut!(lua)?;
-        if args.is_empty() || args.get(0).map_or(true, |v| matches!(v, LuaValue::Nil)) {
+        if args.is_empty() || args.get(0).is_none_or(|v| matches!(v, LuaValue::Nil)) {
             con.pal_reset();
         } else {
             let c0 = args.get(0).and_then(val_to_u8).unwrap_or(0);
@@ -532,11 +566,11 @@ fn register_graphics(lua: &Lua) -> LuaResult<()> {
 
     globals.set("palt", lua.create_function(|lua, args: LuaMultiValue| {
         let mut con = get_console_mut!(lua)?;
-        if args.is_empty() || args.get(0).map_or(true, |v| matches!(v, LuaValue::Nil)) {
+        if args.is_empty() || args.get(0).is_none_or(|v| matches!(v, LuaValue::Nil)) {
             con.palt_reset();
         } else {
             let c = args.get(0).and_then(val_to_u8).unwrap_or(0);
-            let t = args.get(1).map_or(true, val_to_bool);
+            let t = args.get(1).is_none_or(val_to_bool);
             con.palt(c, t);
         }
         Ok(())
@@ -644,7 +678,7 @@ fn register_input(lua: &Lua) -> LuaResult<()> {
     globals.set("btn", lua.create_function(|lua, args: LuaMultiValue| {
         let con = get_console_ref!(lua)?;
         // No-args form: return bitmask of all buttons for player 0
-        if args.is_empty() || args.get(0).map_or(true, |v| matches!(v, LuaValue::Nil)) {
+        if args.is_empty() || args.get(0).is_none_or(|v| matches!(v, LuaValue::Nil)) {
             let mut mask: u8 = 0;
             for bit in 0..6u8 {
                 if con.btn(bit, 0) {
@@ -1097,9 +1131,28 @@ fn register_utility(lua: &Lua) -> LuaResult<()> {
         Ok(())
     })?)?;
 
-    globals.set("extcmd", lua.create_function(|_lua, args: LuaMultiValue| {
+    globals.set("extcmd", lua.create_function(|lua, args: LuaMultiValue| {
         let cmd = args.get(0).map(val_to_display).unwrap_or_default();
-        eprintln!("[extcmd] {cmd}");
+        match cmd.as_str() {
+            "screenshot" => {
+                let con = get_console_ref!(lua)?;
+                let rgba = con.screen_to_rgba();
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let path = format!("screenshot_{}.png", timestamp);
+                write_screen_png(&rgba, &path);
+            }
+            "label" => {
+                let con = get_console_ref!(lua)?;
+                let rgba = con.screen_to_rgba();
+                write_screen_png(&rgba, "label.png");
+            }
+            other => {
+                eprintln!("[extcmd] {other}");
+            }
+        }
         Ok(())
     })?)?;
 
@@ -1157,7 +1210,7 @@ fn register_utility(lua: &Lua) -> LuaResult<()> {
             _ => ",".to_string(),
         };
         // Default: convert numeric strings to numbers (PICO-8 behavior)
-        let convert = args.get(2).map_or(true, val_to_bool);
+        let convert = args.get(2).is_none_or(val_to_bool);
 
         let tbl = lua.create_table()?;
         let parts: Vec<&str> = s.split(&sep).collect();
@@ -1224,8 +1277,18 @@ fn register_utility(lua: &Lua) -> LuaResult<()> {
                     .unwrap_or_default();
                 Ok(LuaValue::String(lua.create_string(&s)?))
             }
-            // stat(7): target FPS
-            7 => Ok(LuaValue::Number(30.0)),
+            // stat(7): target FPS (30 or 60)
+            7 => {
+                let gs = lua.app_data_ref::<GameState>()
+                    .ok_or_else(|| mlua::Error::runtime("GameState missing"))?;
+                Ok(LuaValue::Number(gs.target_fps as f64))
+            }
+            // stat(8): actual measured FPS
+            8 => {
+                let gs = lua.app_data_ref::<GameState>()
+                    .ok_or_else(|| mlua::Error::runtime("GameState missing"))?;
+                Ok(LuaValue::Number(gs.actual_fps as f64))
+            }
             // stat(16-19): SFX currently playing on channel 0-3
             16..=19 => {
                 let ch = (n - 16) as usize;
@@ -1281,8 +1344,15 @@ fn register_utility(lua: &Lua) -> LuaResult<()> {
                 let con = get_console_ref!(lua)?;
                 Ok(LuaValue::Number(con.mouse_btn as f64))
             }
-            // stat(46-49): SFX currently playing (alias for 16-19)
-            46..=49 => {
+            // stat(46): param string from the third argument of load()
+            46 => {
+                let s = lua.app_data_ref::<LoadParam>()
+                    .map(|p| p.0.clone())
+                    .unwrap_or_default();
+                Ok(LuaValue::String(lua.create_string(&s)?))
+            }
+            // stat(47-49): SFX currently playing on channels 1-3 (alias for 17-19)
+            47..=49 => {
                 let ch = (n - 46) as usize;
                 let audio = get_audio_ref!(lua)?;
                 Ok(LuaValue::Number(audio.sfx_on_channel(ch) as f64))
@@ -1332,10 +1402,14 @@ fn register_system(lua: &Lua) -> LuaResult<()> {
             Some(LuaValue::String(s)) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
             _ => String::new(),
         };
+        let param = match args.get(2) {
+            Some(LuaValue::String(s)) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
+            _ => String::new(),
+        };
         // Raise a special error that the main loop will intercept.
         Err::<(), _>(mlua::Error::runtime(format!(
-            "{}{}|{}",
-            LOAD_CART_PREFIX, filename, breadcrumb
+            "{}{}|{}|{}",
+            LOAD_CART_PREFIX, filename, breadcrumb, param
         )))
     })?)?;
 
@@ -1867,7 +1941,7 @@ mod integration_tests {
         let msg = format!("runtime error: {}game.p8|level2", LOAD_CART_PREFIX);
         let result = parse_load_signal(&msg);
         assert!(result.is_some(), "should parse the load signal");
-        let (filename, breadcrumb) = result.unwrap();
+        let (filename, breadcrumb, _param) = result.unwrap();
         assert_eq!(filename, "game.p8");
         assert_eq!(breadcrumb, "level2");
     }
@@ -1877,7 +1951,7 @@ mod integration_tests {
         let msg = format!("runtime error: {}game.p8|", LOAD_CART_PREFIX);
         let result = parse_load_signal(&msg);
         assert!(result.is_some());
-        let (filename, breadcrumb) = result.unwrap();
+        let (filename, breadcrumb, _param) = result.unwrap();
         assert_eq!(filename, "game.p8");
         assert_eq!(breadcrumb, "");
     }
@@ -1927,7 +2001,7 @@ mod integration_tests {
         let err_msg = format!("{}", result.unwrap_err());
         let parsed = parse_load_signal(&err_msg);
         assert!(parsed.is_some(), "should parse: {}", err_msg);
-        let (filename, breadcrumb) = parsed.unwrap();
+        let (filename, breadcrumb, _param) = parsed.unwrap();
         assert_eq!(filename, "sub/dir/cart.p8");
         assert_eq!(breadcrumb, "my breadcrumb");
     }

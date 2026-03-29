@@ -176,7 +176,15 @@ impl Console {
             key_pressed: false,
         }
     }
+}
 
+impl Default for Console {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Console {
     /// Reset all transient drawing state to defaults.
     pub fn reset_draw_state(&mut self) {
         self.draw_color = 6;
@@ -652,6 +660,7 @@ impl Console {
     ///
     /// `w` and `h` are in *sprite units* (each unit = 8 px).
     /// `flip_x` / `flip_y` mirror the sprite.
+    #[allow(clippy::too_many_arguments)]
     pub fn spr(
         &mut self,
         n: i32,
@@ -662,7 +671,7 @@ impl Console {
         flip_x: bool,
         flip_y: bool,
     ) {
-        if n < 0 || n > 255 {
+        if !(0..=255).contains(&n) {
             return;
         }
 
@@ -680,6 +689,7 @@ impl Console {
     /// Draw a rectangle from the sprite sheet onto the screen with optional
     /// scaling and flipping.  Respects transparency, draw palette, camera,
     /// and clipping.
+    #[allow(clippy::too_many_arguments)]
     pub fn sspr(
         &mut self,
         sx: i32,
@@ -760,6 +770,7 @@ impl Console {
     /// `cel_w, cel_h` — size of the region in cells.
     /// `layer` — if non-zero, only draw tiles whose sprite flags bitwise-AND
     ///            with `layer` is non-zero.
+    #[allow(clippy::too_many_arguments)]
     pub fn map_draw(
         &mut self,
         cel_x: i32,
@@ -870,7 +881,7 @@ impl Console {
             }
 
             let code = ch as u32;
-            if code >= 32 && code <= 127 {
+            if (32..=127).contains(&code) {
                 let glyph = &font::FONT[(code - 32) as usize];
                 for row in 0..5i32 {
                     let bits = glyph[row as usize];
@@ -999,6 +1010,7 @@ impl Console {
     /// For each pixel along the line, the sprite sheet is sampled at the
     /// position corresponding to the map coordinate, and the color is drawn
     /// to the screen.  Transparent colors (color 0 by default) are skipped.
+    #[allow(clippy::too_many_arguments)]
     pub fn tline(
         &mut self,
         x0: i32,
@@ -1069,7 +1081,7 @@ impl Console {
     /// Get a persistent data value. Index must be 0-63.
     /// Returns 0.0 for out-of-bounds indices.
     pub fn dget(&self, index: i32) -> f64 {
-        if index < 0 || index > 63 {
+        if !(0..=63).contains(&index) {
             return 0.0;
         }
         self.persistent_data[index as usize]
@@ -1078,7 +1090,7 @@ impl Console {
     /// Set a persistent data value. Index must be 0-63.
     /// Out-of-bounds indices are silently ignored.
     pub fn dset(&mut self, index: i32, value: f64) {
-        if index < 0 || index > 63 {
+        if !(0..=63).contains(&index) {
             return;
         }
         self.persistent_data[index as usize] = value;
@@ -1146,7 +1158,7 @@ impl Console {
         match addr {
             // Sprite sheet: 0x0000-0x0FFF (4096 bytes, 2 pixels per byte)
             0x0000..=0x0FFF => {
-                let offset = (addr - 0x0000) as usize;
+                let offset = addr as usize;
                 let pixel_idx = offset * 2;
                 if pixel_idx + 1 < SPRITE_SHEET_SIZE {
                     let left = self.sprites[pixel_idx] & 0x0F;
@@ -1203,7 +1215,7 @@ impl Console {
         match addr {
             // Sprite sheet: 0x0000-0x0FFF
             0x0000..=0x0FFF => {
-                let offset = (addr - 0x0000) as usize;
+                let offset = addr as usize;
                 let pixel_idx = offset * 2;
                 if pixel_idx + 1 < SPRITE_SHEET_SIZE {
                     self.sprites[pixel_idx] = val & 0x0F;
