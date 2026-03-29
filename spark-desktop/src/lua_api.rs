@@ -20,15 +20,75 @@ use spark_core::lua_preprocess::preprocess_pico8;
 /// real Lua error.
 pub const LOAD_CART_PREFIX: &str = "__SPARK_LOAD_CART__:";
 
+/// Prefix used in the special error message that signals a stop request.
+pub const STOP_CART_PREFIX: &str = "__SPARK_STOP_CART__";
+
+/// Prefix used in the special error message that signals a run/restart request.
+pub const RUN_CART_PREFIX: &str = "__SPARK_RUN_CART__";
+
 /// Wrapper type stored in Lua app_data to hold the breadcrumb string
 /// passed by `load(filename, breadcrumb)` and accessible via `stat(6)`.
 #[derive(Clone, Default)]
 pub struct Breadcrumb(pub String);
 
+/// Stores the cart data ID set by cartdata(). Used to persist dget/dset
+/// values to/from disk between sessions.
+#[derive(Clone, Default)]
+pub struct CartDataId(pub String);
+
 /// Parse a load-cart signal error message.
 ///
 /// If `msg` contains the `LOAD_CART_PREFIX`, returns `Some((filename, breadcrumb))`.
 /// Otherwise returns `None`.
+/// Returns true if `msg` contains the stop-cart signal.
+pub fn is_stop_signal(msg: &str) -> bool {
+    msg.contains(STOP_CART_PREFIX)
+}
+
+/// Returns true if `msg` contains the run/restart-cart signal.
+pub fn is_run_signal(msg: &str) -> bool {
+    msg.contains(RUN_CART_PREFIX)
+}
+
+/// Path to the saved persistent data file for the given cart data ID.
+/// Creates the directory if it does not exist.
+///
+/// Location: `~/.local/share/spark/carts/<id>.dat`
+/// Falls back to the current directory if the home dir cannot be found.
+pub fn cartdata_path(id: &str) -> std::path::PathBuf {
+    let base = std::env::var("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".local").join("share").join("spark").join("carts"))
+        .unwrap_or_else(|_| std::path::PathBuf::from(".spark_carts"));
+    let _ = std::fs::create_dir_all(&base);
+    base.join(format!("{}.dat", id))
+}
+
+/// Serialize persistent_data to 64 little-endian f64 values (512 bytes).
+pub fn save_cartdata(id: &str, data: &[f64; 64]) -> Result<(), String> {
+    let path = cartdata_path(id);
+    let mut bytes = Vec::with_capacity(512);
+    for &v in data.iter() {
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(&path, &bytes).map_err(|e| format!("cartdata save failed: {}", e))
+}
+
+/// Deserialize persistent_data from a 512-byte file (64 little-endian f64s).
+/// Returns zeros if the file is missing or malformed.
+pub fn load_cartdata(id: &str) -> [f64; 64] {
+    let path = cartdata_path(id);
+    let mut data = [0.0f64; 64];
+    if let Ok(bytes) = std::fs::read(&path) {
+        if bytes.len() == 512 {
+            for (i, chunk) in bytes.chunks_exact(8).enumerate().take(64) {
+                let arr: [u8; 8] = chunk.try_into().unwrap_or([0u8; 8]);
+                data[i] = f64::from_le_bytes(arr);
+            }
+        }
+    }
+    data
+}
+
 pub fn parse_load_signal(msg: &str) -> Option<(String, String)> {
     if let Some(rest) = msg.split(LOAD_CART_PREFIX).nth(1) {
         // Find the first occurrence of the prefix payload (it may be wrapped
@@ -133,9 +193,10 @@ macro_rules! get_audio_ref {
 pub fn create_lua() -> LuaResult<Lua> {
     let lua = Lua::new();
 
-    // Insert initial GameState and Breadcrumb
+    // Insert initial GameState, Breadcrumb, and CartDataId
     lua.set_app_data(GameState::new());
     lua.set_app_data(Breadcrumb::default());
+    lua.set_app_data(CartDataId::default());
 
     // Register every function into the Lua globals table.
     register_graphics(&lua)?;
@@ -203,7 +264,7 @@ pub fn call_init(lua: &Lua) -> LuaResult<()> {
 pub fn call_update(lua: &Lua) -> LuaResult<()> {
     {
         let mut gs = lua.app_data_mut::<GameState>()
-            .expect("GameState missing from app_data");
+            .ok_or_else(|| mlua::Error::runtime("GameState missing from app_data"))?;
         gs.frame_count += 1;
     }
 
@@ -221,7 +282,7 @@ pub fn call_update(lua: &Lua) -> LuaResult<()> {
 pub fn call_update60(lua: &Lua) -> LuaResult<()> {
     {
         let mut gs = lua.app_data_mut::<GameState>()
-            .expect("GameState missing from app_data");
+            .ok_or_else(|| mlua::Error::runtime("GameState missing from app_data"))?;
         gs.frame_count += 1;
     }
 
@@ -1042,8 +1103,20 @@ fn register_utility(lua: &Lua) -> LuaResult<()> {
         Ok(())
     })?)?;
 
-    // cartdata() — MVP no-op, accept and ignore (persistent data works in-session)
-    globals.set("cartdata", lua.create_function(|_lua, _args: LuaMultiValue| {
+    globals.set("cartdata", lua.create_function(|lua, args: LuaMultiValue| {
+        let id = match args.get(0) {
+            Some(LuaValue::String(s)) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
+            _ => return Ok(()),
+        };
+        if id.is_empty() {
+            return Ok(());
+        }
+        // Store the cart data ID for later saving.
+        lua.set_app_data(CartDataId(id.clone()));
+        // Load saved data from disk into the console's persistent_data.
+        let saved = load_cartdata(&id);
+        let mut con = get_console_mut!(lua)?;
+        con.persistent_data = saved;
         Ok(())
     })?)?;
 
@@ -1266,18 +1339,14 @@ fn register_system(lua: &Lua) -> LuaResult<()> {
         )))
     })?)?;
 
-    // run() — Restart the cart. In PICO-8 this re-calls _init and resets
-    // game state. For MVP: log and no-op (most carts do not call this).
+    // run() — Restart the cart from _init.
     globals.set("run", lua.create_function(|_lua, _args: LuaMultiValue| {
-        eprintln!("[spark] run() called");
-        Ok(())
+        Err::<(), _>(mlua::Error::runtime(RUN_CART_PREFIX))
     })?)?;
 
-    // stop() — Return to editor. In PICO-8 this exits running mode.
-    // For MVP: registered as a no-op stub so carts do not error.
+    // stop() — Return to editor.
     globals.set("stop", lua.create_function(|_lua, _args: LuaMultiValue| {
-        eprintln!("[spark] stop() called");
-        Ok(())
+        Err::<(), _>(mlua::Error::runtime(STOP_CART_PREFIX))
     })?)?;
 
     // resume() — Resume from stop. In PICO-8 this resumes a stopped cart.
@@ -1622,11 +1691,25 @@ mod integration_tests {
         lua.set_app_data(Console::new());
         lua.set_app_data(Audio::new());
 
-        // Each system function should be callable from Lua without error.
+        // flip() and resume() are no-ops — they must succeed.
         lua.load("flip()").exec().expect("flip() should not error");
-        lua.load("run()").exec().expect("run() should not error");
-        lua.load("stop()").exec().expect("stop() should not error");
         lua.load("resume()").exec().expect("resume() should not error");
+
+        // run() and stop() now signal the main loop via a special error.
+        // Verify they raise the expected signal rather than silently doing nothing.
+        let run_err = lua.load("run()").exec();
+        assert!(run_err.is_err(), "run() should raise a signal error");
+        assert!(
+            run_err.unwrap_err().to_string().contains(RUN_CART_PREFIX),
+            "run() error should contain RUN_CART_PREFIX"
+        );
+
+        let stop_err = lua.load("stop()").exec();
+        assert!(stop_err.is_err(), "stop() should raise a signal error");
+        assert!(
+            stop_err.unwrap_err().to_string().contains(STOP_CART_PREFIX),
+            "stop() error should contain STOP_CART_PREFIX"
+        );
     }
 
     // =================================================================

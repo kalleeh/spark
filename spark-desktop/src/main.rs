@@ -59,6 +59,21 @@ fn window_conf() -> Conf {
     }
 }
 
+/// Save the console's persistent_data to disk if the Lua state has a
+/// CartDataId set. This is called whenever the game exits (stop, escape,
+/// error, or run()).
+fn save_console_cartdata(console: &spark_core::console::Console, lua: &mlua::Lua) {
+    if let Some(id) = lua.app_data_ref::<lua_api::CartDataId>() {
+        if !id.0.is_empty() {
+            if let Err(e) = lua_api::save_cartdata(&id.0, &console.persistent_data) {
+                eprintln!("[spark] cartdata save error: {}", e);
+            } else {
+                eprintln!("[spark] cartdata saved: {}", id.0);
+            }
+        }
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut console = Console::new();
@@ -324,23 +339,33 @@ async fn main() {
                         lua_api::call_update(l)
                     };
 
-                    // Check for load() signal in update errors
+                    // Check for load() / stop() / run() signals in update errors
                     let mut load_request: Option<(String, String)> = None;
+                    let mut stop_requested = false;
+                    let mut run_requested = false;
                     if let Err(e) = update_result {
                         let err_str = format!("{}", e);
                         if let Some(parsed) = lua_api::parse_load_signal(&err_str) {
                             load_request = Some(parsed);
+                        } else if lua_api::is_stop_signal(&err_str) {
+                            stop_requested = true;
+                        } else if lua_api::is_run_signal(&err_str) {
+                            run_requested = true;
                         } else {
                             let msg = format!("Update error: {}", e);
                             eprintln!("[spark] {}", msg);
                             error_msg = Some(msg);
                         }
                     }
-                    if error_msg.is_none() && load_request.is_none() {
+                    if error_msg.is_none() && load_request.is_none() && !stop_requested && !run_requested {
                         if let Err(e) = lua_api::call_draw(l) {
                             let err_str = format!("{}", e);
                             if let Some(parsed) = lua_api::parse_load_signal(&err_str) {
                                 load_request = Some(parsed);
+                            } else if lua_api::is_stop_signal(&err_str) {
+                                stop_requested = true;
+                            } else if lua_api::is_run_signal(&err_str) {
+                                run_requested = true;
                             } else {
                                 let msg = format!("Draw error: {}", e);
                                 eprintln!("[spark] {}", msg);
@@ -357,6 +382,75 @@ async fn main() {
                     game_state = l.remove_app_data::<GameState>();
                     // Note: Breadcrumb stays in Lua app_data -- it persists
                     // for the lifetime of this Lua state (for stat(6) access).
+
+                    // Handle stop() signal — return to editor.
+                    if stop_requested {
+                        eprintln!("[spark] stop() called — returning to editor");
+                        if let Some(ref l) = lua {
+                            save_console_cartdata(&console, l);
+                        }
+                        audio_output.stop();
+                        mode = AppMode::Editor;
+                        lua = None;
+                        game_state = None;
+                        use_60fps = false;
+                        console.reset_draw_state();
+                        editor.sfx_data = audio.sfx_data;
+                        editor.music_data = audio.music_data;
+                    }
+
+                    // Handle run() signal — restart the current cart from _init.
+                    if run_requested && !stop_requested {
+                        eprintln!("[spark] run() called — restarting cart");
+                        if let Some(ref l) = lua {
+                            save_console_cartdata(&console, l);
+                        }
+                        // Drop the old Lua state.
+                        lua = None;
+                        game_state = None;
+                        // Re-initialize console and audio from editor state.
+                        console = Console::new();
+                        audio = Audio::new();
+                        audio.sfx_data = editor.sfx_data;
+                        audio.music_data = editor.music_data;
+                        // Re-run exactly as EditorAction::RunGame does.
+                        match lua_api::create_lua() {
+                            Ok(new_l) => {
+                                new_l.set_app_data(console);
+                                new_l.set_app_data(audio);
+                                new_l.set_app_data(GameState::new());
+                                let code = editor.code.clone();
+                                match lua_api::load_code(&new_l, &code) {
+                                    Ok(()) => match lua_api::call_init(&new_l) {
+                                        Ok(()) => {
+                                            use_60fps = lua_api::has_update60(&new_l);
+                                            console = new_l.remove_app_data::<Console>().unwrap_or_else(Console::new);
+                                            audio = new_l.remove_app_data::<Audio>().unwrap_or_else(Audio::new);
+                                            game_state = new_l.remove_app_data::<GameState>();
+                                            lua = Some(new_l);
+                                            error_msg = None;
+                                        }
+                                        Err(e) => {
+                                            error_msg = Some(format!("_init error: {}", e));
+                                            console = new_l.remove_app_data::<Console>().unwrap_or_else(Console::new);
+                                            audio = new_l.remove_app_data::<Audio>().unwrap_or_else(Audio::new);
+                                            let _ = new_l.remove_app_data::<GameState>();
+                                            game_state = None;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        error_msg = Some(format!("Load error: {}", e));
+                                        console = new_l.remove_app_data::<Console>().unwrap_or_else(Console::new);
+                                        audio = new_l.remove_app_data::<Audio>().unwrap_or_else(Audio::new);
+                                        game_state = None;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error_msg = Some(format!("Lua error: {}", e));
+                            }
+                        }
+                    }
 
                     // Handle load() request: tear down current state and load new cart
                     if let Some((ref filename, ref breadcrumb)) = load_request {
@@ -478,6 +572,9 @@ async fn main() {
 
                 // Escape to return to editor, or on error
                 if is_key_pressed(KeyCode::Escape) || error_msg.is_some() {
+                    if let Some(ref l) = lua {
+                        save_console_cartdata(&console, l);
+                    }
                     // Stop any playing audio before returning to editor.
                     audio_output.stop();
                     mode = AppMode::Editor;

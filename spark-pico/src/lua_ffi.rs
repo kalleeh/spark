@@ -243,19 +243,19 @@ pub unsafe fn clear_state() {
 /// still valid.
 #[inline]
 unsafe fn console() -> &'static mut Console {
-    &mut *CONSOLE.unwrap()
+    &mut *CONSOLE.expect("console() called before set_state()")
 }
 
 /// Get a mutable reference to the global `Audio`.
 #[inline]
 unsafe fn audio() -> &'static mut Audio {
-    &mut *AUDIO.unwrap()
+    &mut *AUDIO.expect("audio() called before set_state()")
 }
 
 /// Get a mutable reference to the global `GameState`.
 #[inline]
 unsafe fn game_state() -> &'static mut GameState {
-    &mut *GAME_STATE.unwrap()
+    &mut *GAME_STATE.expect("game_state() called before set_state()")
 }
 
 // ============================================================================
@@ -1138,14 +1138,18 @@ unsafe extern "C" fn api_flip(_L: *mut LuaState) -> i32 {
     0
 }
 
-/// `run()` -- Restart the cart. MVP no-op stub.
+/// `run()` -- Restart the cart. Triggers a full MCU reset — the firmware
+/// will reinitialize from scratch and re-run the baked-in cart.
 unsafe extern "C" fn api_run(_L: *mut LuaState) -> i32 {
-    0
+    cortex_m::peripheral::SCB::sys_reset();
 }
 
-/// `stop()` -- Return to editor. MVP no-op stub.
+/// `stop()` -- Halt execution. On bare-metal there is no editor to return
+/// to, so we spin in a low-power wait loop.
 unsafe extern "C" fn api_stop(_L: *mut LuaState) -> i32 {
-    0
+    loop {
+        cortex_m::asm::wfi();
+    }
 }
 
 /// `resume()` -- Resume from stop. MVP no-op stub.
