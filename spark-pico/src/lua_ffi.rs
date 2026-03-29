@@ -1007,8 +1007,13 @@ unsafe extern "C" fn api_stat(L: *mut LuaState) -> i32 {
             lua_pushstring(L, c"".as_ptr());
             1
         }
-        // stat(7): target FPS
+        // stat(7): target FPS. Spark embedded runs at 30 fps (audio-paced).
         7 => {
+            lua_pushnumber(L, 30.0);
+            1
+        }
+        // stat(8): actual FPS (fixed 30 on embedded)
+        8 => {
             lua_pushnumber(L, 30.0);
             1
         }
@@ -1076,8 +1081,13 @@ unsafe extern "C" fn api_stat(L: *mut LuaState) -> i32 {
             lua_pushnumber(L, console().mouse_btn as f32);
             1
         }
-        // stat(46-49): SFX currently playing (alias for 16-19)
-        46..=49 => {
+        // stat(46): load() param string (always empty on embedded — single baked-in cart)
+        46 => {
+            lua_pushstring(L, c"".as_ptr());
+            1
+        }
+        // stat(47-49): SFX on channels 1-3 (alias for 17-19)
+        47..=49 => {
             let ch = (n - 46) as usize;
             let val = audio().sfx_on_channel(ch);
             lua_pushnumber(L, val as f32);
@@ -1146,8 +1156,13 @@ unsafe extern "C" fn api_menuitem(_L: *mut LuaState) -> i32 {
     0
 }
 
-/// `extcmd(cmd)` -- MVP no-op on embedded
-unsafe extern "C" fn api_extcmd(_L: *mut LuaState) -> i32 {
+/// `extcmd(cmd)` -- extended command.
+/// On embedded: "reset" triggers a full system reset via SCB.
+unsafe extern "C" fn api_extcmd(L: *mut LuaState) -> i32 {
+    let cmd = arg_str(L, 1);
+    if cmd == "reset" {
+        cortex_m::peripheral::SCB::sys_reset();
+    }
     0
 }
 
