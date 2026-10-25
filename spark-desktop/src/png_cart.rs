@@ -1,27 +1,35 @@
-// png_cart.rs -- Parse .p8.png cartridge images for Spark.
+// png_cart.rs -- Parse real PICO-8 .p8.png cartridge images for Spark.
 //
-// PICO-8 carts can be distributed as 128x128 PNG images where the cart data is
-// encoded steganographically in the least significant 2 bits of each RGBA
-// channel. This module decodes the PNG, extracts the hidden bytes, and
-// populates a `CartData` struct.
+// A PICO-8 cart image is a 160x205 RGBA PNG (a 128x128 label with a border).
+// Cart data is hidden in the least-significant 2 bits of each channel: one byte
+// per pixel, read in raster order, with the byte assembled as
+// (A<<6)|(R<<4)|(G<<2)|B. The first 0x8000 (32768) pixels carry the 32 KB
+// PICO-8 memory image; pixel 0x8000 is a format version byte.
+//
+// This matches the real PICO-8 / fake-08 / zepto8 format (verified against
+// fake-08's source). The earlier custom 128x128 layout is not produced by
+// PICO-8 and is no longer supported.
 
 use spark_core::audio::{MusicPattern, Note, NOTES_PER_SFX, NUM_MUSIC, NUM_SFX};
 use spark_core::cart::CartData;
 use spark_core::console::{MAP_SIZE, SPRITE_SHEET_SIZE};
 
-/// Total bytes encoded in a 128x128 RGBA image (1 byte per pixel).
-const PNG_DATA_SIZE: usize = 128 * 128;
+/// Real PICO-8 cart image dimensions.
+const PNG_WIDTH: u32 = 160;
+const PNG_HEIGHT: u32 = 205;
+/// Number of pixels (= encoded bytes) in a cart image: 160 * 205 = 32800.
+const PNG_PIXELS: usize = (PNG_WIDTH * PNG_HEIGHT) as usize;
+/// Size of the PICO-8 memory image carried by the first 0x8000 bytes.
+const CART_RAM_SIZE: usize = 0x8000;
 
-// Section byte offsets within the 16384-byte raw data.
+// Section byte offsets within the 0x8000-byte PICO-8 memory image.
 //
 //   0x0000-0x1FFF: Sprite sheet (packed nibbles, 8192 bytes -> 16384 pixels)
-//   0x1000-0x1FFF: Upper sprite sheet / shared with map rows 32-63
-//   0x2000-0x2FFF: Map rows 0-31 (4096 bytes)
-//   0x2000-0x20FF: Sprite flags (256 bytes, overlaps map region in layout)
-//   0x3000-0x30FF: Sprite flags (canonical position)
+//   0x2000-0x2FFF: Map (rows 0-31; rows 32-63 share the upper sprite sheet)
+//   0x3000-0x30FF: Sprite flags (256 bytes)
 //   0x3100-0x31FF: Song/music data (64 * 4 = 256 bytes)
 //   0x3200-0x42FF: SFX data (64 * 68 = 4352 bytes)
-//   0x4300+:       Compressed Lua code
+//   0x4300-0x7FFF: Lua code (raw, or `:c:` / `\0pxa` compressed)
 const GFX_START: usize = 0x0000;
 const GFX_END: usize = 0x2000;
 const GFF_START: usize = 0x3000;
@@ -54,7 +62,8 @@ pub fn parse_p8_png(png_bytes: &[u8]) -> Result<CartData, String> {
 // ---------------------------------------------------------------------------
 
 /// Decode the PNG and extract 1 byte per pixel from the least significant
-/// 2 bits of each RGBA channel.
+/// 2 bits of each RGBA channel, assembling `(A<<6)|(R<<4)|(G<<2)|B` per the
+/// real PICO-8 format. Returns the 0x8000-byte PICO-8 memory image.
 fn extract_steganographic_data(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let decoder = png::Decoder::new(png_bytes);
     let mut reader = decoder
@@ -66,8 +75,11 @@ fn extract_steganographic_data(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
         let info = reader.info();
         (info.width, info.height)
     };
-    if width != 128 || height != 128 {
-        return Err(format!("Expected 128x128 PNG, got {}x{}", width, height));
+    if width != PNG_WIDTH || height != PNG_HEIGHT {
+        return Err(format!(
+            "Expected a {}x{} PICO-8 cart image, got {}x{}",
+            PNG_WIDTH, PNG_HEIGHT, width, height
+        ));
     }
 
     // Allocate a buffer large enough for one frame.
@@ -80,34 +92,38 @@ fn extract_steganographic_data(png_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let color_type = frame_info.color_type;
     let channels = color_type.samples();
 
-    // We need at least RGBA (4 channels) for the steganographic encoding.
-    // RGB (3 channels) images are also accepted -- the alpha contribution
-    // is treated as 0 (since there is no alpha channel).
-    if channels < 3 {
+    // The steganographic encoding uses all four RGBA channels.
+    if channels != 4 {
         return Err(format!(
-            "Expected RGBA or RGB PNG, got color type {:?} ({} channels)",
+            "Expected an RGBA PNG, got color type {:?} ({} channels)",
             color_type, channels
         ));
     }
-
-    let pixel_count = (width * height) as usize;
-    if pixel_count != PNG_DATA_SIZE {
+    if frame_info.bit_depth != png::BitDepth::Eight {
         return Err(format!(
-            "Expected {} pixels, got {}",
-            PNG_DATA_SIZE, pixel_count
+            "Expected an 8-bit PNG, got {:?}",
+            frame_info.bit_depth
+        ));
+    }
+    if buf.len() < PNG_PIXELS * channels {
+        return Err(format!(
+            "PNG buffer too small: {} bytes for {} pixels",
+            buf.len(),
+            PNG_PIXELS
         ));
     }
 
-    let mut data = Vec::with_capacity(PNG_DATA_SIZE);
-    for i in 0..pixel_count {
+    // We only need the 0x8000-byte PICO-8 memory image (the version byte at
+    // pixel 0x8000 and the label border beyond it are ignored).
+    let mut data = Vec::with_capacity(CART_RAM_SIZE);
+    for i in 0..CART_RAM_SIZE {
         let base = i * channels;
-        let r = buf[base];
-        let g = buf[base + 1];
-        let b = buf[base + 2];
-        let a = if channels >= 4 { buf[base + 3] } else { 0xFF };
-
-        // Byte = low2(R) | low2(G)<<2 | low2(B)<<4 | low2(A)<<6
-        let byte = (r & 3) | ((g & 3) << 2) | ((b & 3) << 4) | ((a & 3) << 6);
+        let r = buf[base] & 3;
+        let g = buf[base + 1] & 3;
+        let b = buf[base + 2] & 3;
+        let a = buf[base + 3] & 3;
+        // PICO-8 byte order: (A<<6)|(R<<4)|(G<<2)|B.
+        let byte = (a << 6) | (r << 4) | (g << 2) | b;
         data.push(byte);
     }
 
@@ -280,262 +296,224 @@ fn decode_music(raw: &[u8], cart: &mut CartData) {
 // Lua code decompression
 // ---------------------------------------------------------------------------
 
-/// Decode (and possibly decompress) the Lua code section starting at 0x4300.
+/// Decode (and possibly decompress) a Lua code-region byte slice (the bytes
+/// starting at `CODE_START` in a cart's memory image) into Lua source.
+///
+/// Three encodings exist, distinguished by the first bytes:
+///
+///   * `\0pxa` : PICO-8 v0.2.0+ compression (move-to-front + LZ bitstream)
+///   * `:c:\0` : legacy compression (byte-oriented LZ with a char LUT)
+///   * neither: raw, NUL-terminated Lua source
+///
+/// Exposed for fuzzing / unit-testing the decompressors directly without
+/// constructing a full PNG.
+pub fn decode_code_region(code_data: &[u8]) -> Result<String, String> {
+    if code_data.len() >= 4 && &code_data[0..4] == b"\0pxa" {
+        decompress_pxa(code_data)
+    } else if code_data.len() >= 4 && &code_data[0..4] == b":c:\0" {
+        decompress_code_legacy(code_data)
+    } else {
+        let end = code_data
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(code_data.len());
+        Ok(String::from_utf8_lossy(&code_data[..end]).into_owned())
+    }
+}
+
+/// Decode the Lua code section (0x4300-0x7FFF) of a cart memory image into
+/// `cart.code`. See [`decode_code_region`] for the encodings handled.
 fn decode_code(raw: &[u8], cart: &mut CartData) -> Result<(), String> {
     if CODE_START >= raw.len() {
         cart.code = String::new();
         return Ok(());
     }
-    let code_data = &raw[CODE_START..];
-
-    if code_data.len() >= 4 && &code_data[0..4] == b":c:\0" {
-        // Newer compressed format (PICO-8 v0.2.0+)
-        cart.code = decompress_code_new(code_data)?;
-    } else if !code_data.is_empty() && code_data[0] == 0x00 {
-        // Older compressed format: starts with 0x00 header
-        cart.code = decompress_code_old(code_data)?;
-    } else if !code_data.is_empty() && code_data[0] == b':' {
-        // Uncompressed code (starts with ':' but not ":c:\0")
-        // Find the null terminator.
-        let end = code_data
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(code_data.len());
-        cart.code = String::from_utf8_lossy(&code_data[1..end]).into_owned();
-    } else {
-        // Possibly uncompressed or raw -- try to interpret as text.
-        let end = code_data
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(code_data.len());
-        if end == 0 {
-            cart.code = String::new();
-        } else {
-            cart.code = String::from_utf8_lossy(&code_data[..end]).into_owned();
-        }
-    }
-
+    cart.code = decode_code_region(&raw[CODE_START..])?;
     Ok(())
 }
 
-/// Character map used by PICO-8 new compression (`:c:\0` format).
-///
-/// The first entry (index 0) is a special "copy from" marker; indices 1-59
-/// map to the most commonly used characters in Lua source.
-const COMPRESS_CHAR_TABLE: &[u8] = b"\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(){}[]<>+=/*:;.,~_";
+/// Character lookup table for the legacy `:c:\0` compression format.
+/// Index 0 is unused; codes 0x01-0x3B map to entries 0-58.
+const LEGACY_CHAR_TABLE: &[u8] = b"\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(){}[]<>+=/*:;.,~_";
 
-/// Decompress code in the newer `:c:\0` format (PICO-8 v0.2.0+).
+/// Decompress the legacy `:c:\0` format (verified against fake-08 / the
+/// PICO-8 wiki P8PNGFileFormat spec).
 ///
-/// Format:
+/// Layout:
 ///   Bytes 0-3: header `:c:\0`
-///   Bytes 4-5: uncompressed length (little-endian u16)
-///   Bytes 6+:  compressed bitstream
-///
-/// The bitstream encodes:
-///   - If next bit is 1: the next 4 bits index into COMPRESS_CHAR_TABLE
-///     (indices 1-15 map to the 15 most common chars).
-///   - If next bit is 0 and the following bit is 0: literal byte (next 8 bits).
-///   - If next bit is 0 and the following bit is 1: the next 5 bits index into
-///     the extended character table (indices 0-58 map to more chars). But wait --
-///     the encoding is actually simpler than this.
-///
-/// Let me describe the actual decompression algorithm based on the PICO-8
-/// community's reverse-engineering:
-///
-/// Read bits from MSB first. For each output character:
-///   1. Read 1 bit.
-///      - If 1: read 4 more bits => index (1-15) into the short character map
-///        (first 15 entries of COMPRESS_CHAR_TABLE starting from index 1).
-///        Output that character.
-///      - If 0: read 1 more bit.
-///        - If 0 (so pattern 00): read 8 bits => literal byte. Output it.
-///        - If 1 (so pattern 01): read 5 bits => n (0-31).
-///          If n < length(COMPRESS_CHAR_TABLE): output COMPRESS_CHAR_TABLE[n].
-///          Otherwise this is a copy reference.
-///
-///   read 4 more bits => offset high, let offset_bits = (n - 59) * 16 + offset_high.
-///   This gets complex with the copy offsets.
-///
-/// The actual algorithm based on careful reverse-engineering:
-fn decompress_code_new(data: &[u8]) -> Result<String, String> {
+///   Bytes 4-5: decompressed length, **MSB first** (`[4]*256 + [5]`)
+///   Bytes 6-7: reserved (zero)
+///   Bytes 8+:  byte-oriented stream:
+///     0x00       -> copy the next raw byte verbatim
+///     0x01-0x3B  -> emit LEGACY_CHAR_TABLE[byte - 1]
+///     0x3C-0xFF  -> back-reference: offset = (byte-0x3C)*16 + (next & 0xF),
+///                   length = (next >> 4) + 2
+fn decompress_code_legacy(data: &[u8]) -> Result<String, String> {
     if data.len() < 8 {
-        return Err("Compressed code section too short".to_string());
+        return Err("Legacy compressed code section too short".to_string());
     }
-    let uncompressed_len = (data[4] as usize) | ((data[5] as usize) << 8);
-    let compressed = &data[8..]; // Skip 4-byte header + 2-byte length + 2 reserved
+    let length = (data[4] as usize) * 256 + (data[5] as usize);
 
-    let mut reader = BitReader::new(compressed);
-    let mut output: Vec<u8> = Vec::with_capacity(uncompressed_len);
-
-    while output.len() < uncompressed_len {
-        let bit = reader
-            .read_bits(1)
-            .ok_or("Unexpected end of compressed data")?;
-        if bit == 1 {
-            // 1 + 4 bits: index into short table (entries 1-15)
-            let idx = reader
-                .read_bits(4)
-                .ok_or("Unexpected end reading short char index")? as usize;
-            if idx < COMPRESS_CHAR_TABLE.len() {
-                output.push(COMPRESS_CHAR_TABLE[idx]);
-            }
-        } else {
-            let bit2 = reader
-                .read_bits(1)
-                .ok_or("Unexpected end reading second bit")?;
-            if bit2 == 0 {
-                // 00 + 8 bits: literal byte
-                let byte = reader
-                    .read_bits(8)
-                    .ok_or("Unexpected end reading literal byte")? as u8;
-                output.push(byte);
-            } else {
-                // 01 + 5 bits: extended table index or copy reference
-                let idx = reader
-                    .read_bits(5)
-                    .ok_or("Unexpected end reading extended index")?
-                    as usize;
-                if idx < COMPRESS_CHAR_TABLE.len() {
-                    output.push(COMPRESS_CHAR_TABLE[idx]);
-                } else {
-                    // Copy reference: read offset and length
-                    // The offset uses (idx - len(table)) to determine extra bits
-                    let extra = idx - COMPRESS_CHAR_TABLE.len();
-                    // Read 4 bits for offset high, total offset = extra * 16 + high + 1
-                    let offset_hi = reader
-                        .read_bits(4)
-                        .ok_or("Unexpected end reading copy offset")?
-                        as usize;
-
-                    let copy_offset = (extra << 4) + offset_hi + 1;
-
-                    // Read copy length: 4 bits, value + 2 gives actual length
-                    let copy_len = reader
-                        .read_bits(4)
-                        .ok_or("Unexpected end reading copy length")?
-                        as usize
-                        + 2;
-
-                    if copy_offset > output.len() {
-                        // Invalid back-reference; output spaces as fallback
-                        output.extend(std::iter::repeat_n(b' ', copy_len));
-                    } else {
-                        let start = output.len() - copy_offset;
-                        for j in 0..copy_len {
-                            let c = output[start + (j % copy_offset)];
-                            output.push(c);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    output.truncate(uncompressed_len);
-    String::from_utf8(output).map_err(|e| format!("Decompressed code is not valid UTF-8: {}", e))
-}
-
-/// Decompress code in the older format (header byte 0x00).
-///
-/// Format:
-///   Byte 0: 0x00
-///   Bytes 1-2: uncompressed length (little-endian u16)
-///   Bytes 3+: compressed data using a simple LZ scheme
-///
-/// Each byte in the compressed stream:
-///   0x00: end of stream
-///   0x01-0x3B: literal character from a lookup table
-///   0x3C-0xFF: copy reference -- next byte encodes offset,
-///              length = current_byte - 0x3B
-fn decompress_code_old(data: &[u8]) -> Result<String, String> {
-    if data.len() < 3 {
-        return Err("Old compressed code section too short".to_string());
-    }
-
-    let uncompressed_len = (data[1] as usize) | ((data[2] as usize) << 8);
-    let compressed = &data[3..];
-
-    // Old format character table: same characters used by PICO-8
-    let char_table: &[u8] = b"#\n 0123456789abcdefghijklmnopqrstuvwxyz!#%(){}[]<>+=/*:;.,~_";
-
-    let mut output: Vec<u8> = Vec::with_capacity(uncompressed_len);
-    let mut i = 0;
-
-    while i < compressed.len() && output.len() < uncompressed_len {
-        let b = compressed[i];
-        i += 1;
-
+    let mut out: Vec<u8> = Vec::with_capacity(length);
+    let mut i = 8;
+    while i < data.len() && out.len() < length {
+        let b = data[i];
         if b == 0x00 {
-            break;
-        } else if b <= 0x3B {
-            // Literal character from table
-            let idx = (b - 1) as usize;
-            if idx < char_table.len() {
-                output.push(char_table[idx]);
-            }
-        } else {
-            // Copy reference
-            if i >= compressed.len() {
+            // Literal raw byte follows.
+            i += 1;
+            if i >= data.len() {
                 break;
             }
-            let offset = compressed[i] as usize;
+            out.push(data[i]);
             i += 1;
-            let length = (b as usize) - 0x3B;
+        } else if b < 0x3C {
+            out.push(LEGACY_CHAR_TABLE[(b - 1) as usize]);
+            i += 1;
+        } else {
+            if i + 1 >= data.len() {
+                break;
+            }
+            let next = data[i + 1];
+            let offset = (b as usize - 0x3C) * 16 + (next & 0xF) as usize;
+            let copy_len = (next >> 4) as usize + 2;
+            if offset == 0 || offset > out.len() {
+                break; // malformed back-reference
+            }
+            let start = out.len() - offset;
+            for j in 0..copy_len {
+                out.push(out[start + j]);
+            }
+            i += 2;
+        }
+    }
 
-            if offset > output.len() {
-                output.extend(std::iter::repeat_n(b' ', length));
+    out.truncate(length);
+    // The declared length can include a terminating NUL; trim at the first one
+    // so it doesn't leak into the source as an embedded \0.
+    if let Some(nul) = out.iter().position(|&b| b == 0) {
+        out.truncate(nul);
+    }
+    // PICO-8 source can contain P8SCII bytes (>= 0x80) that are not valid
+    // UTF-8; decode lossily rather than rejecting the whole cart.
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// Decompress the modern `\0pxa` format (PICO-8 v0.2.0+).
+///
+/// Ported from zepto8 / fake-08 `pxa_decompress`. Bits are read LSB-first.
+///   Bytes 4-5: decompressed length, MSB first
+///   Bytes 6-7: compressed byte count, MSB first
+///   Bytes 8+:  bitstream over a move-to-front (MTF) byte table:
+///     bit 1 -> emit: nbits = 4 + (count of following 1-bits); index
+///              n = get_bits(nbits) + (1<<nbits) - 16; emit mtf.get(n)
+///     bit 0 -> back-reference: nbits = 1?(1?5:10):15; offset = get_bits(nbits)+1.
+///              If nbits==10 && offset==1: a run of raw bytes until a 0 byte.
+///              Else length = 3 + sum of 3-bit groups (continue while group==7).
+fn decompress_pxa(data: &[u8]) -> Result<String, String> {
+    if data.len() < 8 {
+        return Err("pxa compressed code section too short".to_string());
+    }
+    let length = (data[4] as usize) * 256 + (data[5] as usize);
+    let compressed = (data[6] as usize) * 256 + (data[7] as usize);
+    // `compressed` comes from the (untrusted) header and may claim more bytes
+    // than `data` actually holds. Clamp the bit budget to the real buffer so
+    // `get_bits` can never index past `data` (a malformed/truncated cart must
+    // error or stop, not panic out of bounds).
+    let compressed_bits = (compressed * 8).min(data.len() * 8);
+
+    // Bit cursor (in bits), starting after the 8-byte header. LSB-first.
+    let mut pos = 8usize * 8;
+    fn get_bits(data: &[u8], pos: &mut usize, compressed_bits: usize, count: usize) -> u32 {
+        let mut n = 0u32;
+        let mut i = 0;
+        while i < count && *pos < compressed_bits {
+            let bit = (data[*pos >> 3] >> (*pos & 7)) & 1;
+            n |= (bit as u32) << i;
+            *pos += 1;
+            i += 1;
+        }
+        n
+    }
+    macro_rules! get_bits {
+        ($count:expr) => {
+            get_bits(data, &mut pos, compressed_bits, $count)
+        };
+    }
+
+    // Move-to-front table.
+    let mut mtf: [u8; 256] = core::array::from_fn(|i| i as u8);
+
+    let mut out: Vec<u8> = Vec::with_capacity(length);
+    while out.len() < length && pos < compressed_bits {
+        if get_bits!(1) == 1 {
+            // Emit a single byte via MTF.
+            let mut nbits = 4u32;
+            while get_bits!(1) == 1 {
+                nbits += 1;
+            }
+            let n = (get_bits!(nbits as usize) + (1u32 << nbits)).wrapping_sub(16) as usize;
+            if n >= 256 {
+                break;
+            }
+            let ch = mtf[n];
+            if ch == 0 {
+                break;
+            }
+            // Move ch to front.
+            mtf.copy_within(0..n, 1);
+            mtf[0] = ch;
+            out.push(ch);
+        } else {
+            // Back-reference (or raw-byte run).
+            let nbits = if get_bits!(1) == 1 {
+                if get_bits!(1) == 1 {
+                    5
+                } else {
+                    10
+                }
             } else {
-                let start = output.len() - offset;
-                for j in 0..length {
-                    let c = output[start + (j % offset)];
-                    output.push(c);
+                15
+            };
+            let offset = get_bits!(nbits) as usize + 1;
+
+            if nbits == 10 && offset == 1 {
+                // Run of raw bytes terminated by a 0 byte.
+                loop {
+                    let ch = get_bits!(8) as u8;
+                    if ch == 0 {
+                        break;
+                    }
+                    out.push(ch);
+                }
+            } else {
+                let mut len = 3usize;
+                loop {
+                    let n = get_bits!(3) as usize;
+                    len += n;
+                    if n != 7 {
+                        break;
+                    }
+                }
+                if offset > out.len() {
+                    break; // malformed
+                }
+                let start = out.len() - offset;
+                for j in 0..len {
+                    out.push(out[start + j]);
                 }
             }
         }
     }
 
-    output.truncate(uncompressed_len);
-    String::from_utf8(output).map_err(|e| format!("Decompressed code is not valid UTF-8: {}", e))
-}
-
-// ---------------------------------------------------------------------------
-// Bit reader utility
-// ---------------------------------------------------------------------------
-
-/// A simple MSB-first bit reader over a byte slice.
-struct BitReader<'a> {
-    data: &'a [u8],
-    byte_pos: usize,
-    bit_pos: u8, // 0-7, counts from MSB (7) down to LSB (0)
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        BitReader {
-            data,
-            byte_pos: 0,
-            bit_pos: 0,
-        }
+    out.truncate(length);
+    // The declared length can include a terminating NUL; trim at the first one
+    // so it doesn't leak into the source as an embedded \0.
+    if let Some(nul) = out.iter().position(|&b| b == 0) {
+        out.truncate(nul);
     }
-
-    /// Read `n` bits (1-16) and return them as a u16. Returns None on EOF.
-    fn read_bits(&mut self, n: u8) -> Option<u16> {
-        let mut result: u16 = 0;
-        for _ in 0..n {
-            if self.byte_pos >= self.data.len() {
-                return None;
-            }
-            // Read the next bit from MSB first
-            let bit = (self.data[self.byte_pos] >> (7 - self.bit_pos)) & 1;
-            result = (result << 1) | (bit as u16);
-            self.bit_pos += 1;
-            if self.bit_pos >= 8 {
-                self.bit_pos = 0;
-                self.byte_pos += 1;
-            }
-        }
-        Some(result)
-    }
+    // PICO-8 source can contain P8SCII bytes (>= 0x80) that are not valid
+    // UTF-8; decode lossily rather than rejecting the whole cart.
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -546,327 +524,125 @@ impl<'a> BitReader<'a> {
 mod tests {
     use super::*;
 
-    /// Create a minimal 128x128 RGBA PNG from raw pixel data.
-    fn make_test_png(pixels: &[u8; PNG_DATA_SIZE]) -> Vec<u8> {
-        let mut rgba = vec![0u8; PNG_DATA_SIZE * 4];
-        for i in 0..PNG_DATA_SIZE {
-            let byte = pixels[i];
-            // Encode: R low 2 bits = byte & 3, G low 2 = (byte >> 2) & 3, etc.
-            rgba[i * 4] = byte & 3; // R
+    #[test]
+    fn test_pxa_decompress_malformed_no_panic() {
+        // Regression (loader fuzzer): a `\0pxa` header that claims more
+        // compressed bytes than are present must not index out of bounds.
+        // header bytes 6-7 = 0xffff (claims 65535 compressed bytes) but the
+        // buffer is tiny.
+        let mut data = vec![0u8, b'p', b'x', b'a', 0x10, 0x00, 0xff, 0xff];
+        data.extend_from_slice(&[0xaa, 0x55, 0x01]); // a few stray bitstream bytes
+                                                     // Must return a value or Err, never panic.
+        let _ = decode_code_region(&data);
+
+        // Also exercise a range of truncations of a pxa stream.
+        for cut in 8..=data.len() {
+            let _ = decode_code_region(&data[..cut]);
+        }
+    }
+
+    #[test]
+    fn test_legacy_decompress_malformed_no_panic() {
+        // `:c:\0` with a length header larger than the data, plus random bytes.
+        let mut data = vec![b':', b'c', b':', 0u8, 0xff, 0xff];
+        data.extend_from_slice(&[0x01, 0x02, 0x3b, 0x00, 0xfe]);
+        let _ = decode_code_region(&data);
+        for cut in 4..=data.len() {
+            let _ = decode_code_region(&data[..cut]);
+        }
+    }
+
+    /// Build a real-format 160x205 RGBA PICO-8 cart PNG whose first
+    /// `0x8000` decoded bytes equal `mem`. Encodes each byte as the real
+    /// PICO-8 layout: (A<<6)|(R<<4)|(G<<2)|B in the low 2 bits per channel.
+    fn make_cart_png(mem: &[u8]) -> Vec<u8> {
+        let mut rgba = vec![0u8; PNG_PIXELS * 4];
+        for i in 0..PNG_PIXELS {
+            let byte = mem.get(i).copied().unwrap_or(0);
+            rgba[i * 4] = (byte >> 4) & 3; // R
             rgba[i * 4 + 1] = (byte >> 2) & 3; // G
-            rgba[i * 4 + 2] = (byte >> 4) & 3; // B
-            rgba[i * 4 + 3] = (byte >> 6) | 0xFC; // A (set high bits so alpha is mostly opaque)
+            rgba[i * 4 + 2] = byte & 3; // B
+            rgba[i * 4 + 3] = (byte >> 6) & 3; // A
         }
-
-        // Encode as PNG using the png crate
-        let mut png_bytes = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut png_bytes, 128, 128);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder.write_header().expect("PNG write header");
-            writer.write_image_data(&rgba).expect("PNG write data");
-        }
-        png_bytes
+        crate::encode_rgba_png(PNG_WIDTH, PNG_HEIGHT, &rgba)
     }
 
     #[test]
-    fn test_extract_steganographic_data() {
-        let mut pixels = [0u8; PNG_DATA_SIZE];
-        // Set some known values
-        pixels[0] = 0xAB; // 10101011
-        pixels[1] = 0x42; // 01000010
-        pixels[100] = 0xFF;
-        pixels[PNG_DATA_SIZE - 1] = 0x12;
-
-        let png_bytes = make_test_png(&pixels);
-        let extracted = extract_steganographic_data(&png_bytes).unwrap();
-
-        assert_eq!(extracted.len(), PNG_DATA_SIZE);
-        assert_eq!(extracted[0], 0xAB);
-        assert_eq!(extracted[1], 0x42);
-        assert_eq!(extracted[100], 0xFF);
-        assert_eq!(extracted[PNG_DATA_SIZE - 1], 0x12);
+    fn test_rejects_wrong_dimensions() {
+        // A 128x128 image is not a real PICO-8 cart.
+        let png_bytes = crate::encode_rgba_png(128, 128, &vec![0u8; 128 * 128 * 4]);
+        assert!(parse_p8_png(&png_bytes).is_err());
     }
 
     #[test]
-    fn test_extract_all_byte_values() {
-        let mut pixels = [0u8; PNG_DATA_SIZE];
-        // Test that every possible byte value round-trips correctly
-        for i in 0..256 {
-            pixels[i] = i as u8;
+    fn test_extract_byte_order() {
+        // Verify the (A<<6)|(R<<4)|(G<<2)|B assembly round-trips every value.
+        let mut mem = vec![0u8; CART_RAM_SIZE];
+        for (i, slot) in mem.iter_mut().take(256).enumerate() {
+            *slot = i as u8;
         }
-
-        let png_bytes = make_test_png(&pixels);
-        let extracted = extract_steganographic_data(&png_bytes).unwrap();
-
-        for i in 0..256 {
-            assert_eq!(
-                extracted[i], i as u8,
-                "Byte value {} did not round-trip correctly",
-                i
-            );
+        let png_bytes = make_cart_png(&mem);
+        let raw = extract_steganographic_data(&png_bytes).unwrap();
+        assert_eq!(raw.len(), CART_RAM_SIZE);
+        for (i, &got) in raw.iter().take(256).enumerate() {
+            assert_eq!(got, i as u8, "byte {i} did not round-trip");
         }
     }
 
     #[test]
-    fn test_decode_gfx() {
-        let mut raw = vec![0u8; PNG_DATA_SIZE];
-        // GFX at offset 0x0000: packed nibbles
-        // Byte 0x00 = 0x21 means pixel 0 = 1 (low nibble), pixel 1 = 2 (high nibble)
-        raw[0] = 0x21;
-        raw[1] = 0xF0; // pixel 2 = 0, pixel 3 = 15
+    fn test_decode_sections_real_layout() {
+        let mut mem = vec![0u8; CART_RAM_SIZE];
+        // gfx: byte 0 = 0xA5 -> pixels 5, 10
+        mem[0x0000] = 0xA5;
+        // map upper row at 0x2000
+        mem[0x2000] = 0x42;
+        // flags at 0x3000
+        mem[0x3000] = 0x07;
+        // raw (uncompressed) code at 0x4300: ":" not present, plain text + NUL
+        let code = b"print(1)\0";
+        mem[0x4300..0x4300 + code.len()].copy_from_slice(code);
 
-        let mut cart = CartData::new();
-        decode_gfx(&raw, &mut cart);
-
-        assert_eq!(cart.sprites[0], 1);
-        assert_eq!(cart.sprites[1], 2);
-        assert_eq!(cart.sprites[2], 0);
-        assert_eq!(cart.sprites[3], 15);
-    }
-
-    #[test]
-    fn test_decode_gff() {
-        let mut raw = vec![0u8; PNG_DATA_SIZE];
-        // GFF at offset 0x3000
-        raw[0x3000] = 0x01;
-        raw[0x3001] = 0xFF;
-        raw[0x30FF] = 0xAB;
-
-        let mut cart = CartData::new();
-        decode_gff(&raw, &mut cart);
-
-        assert_eq!(cart.flags[0], 0x01);
-        assert_eq!(cart.flags[1], 0xFF);
-        assert_eq!(cart.flags[255], 0xAB);
-    }
-
-    #[test]
-    fn test_decode_map_upper() {
-        let mut raw = vec![0u8; PNG_DATA_SIZE];
-        // Upper map at offset 0x2000
-        raw[0x2000] = 0x42;
-        raw[0x2001] = 0x21;
-
-        let mut cart = CartData::new();
-        decode_map(&raw, &mut cart);
-
-        assert_eq!(cart.map[0], 0x42);
-        assert_eq!(cart.map[1], 0x21);
-    }
-
-    #[test]
-    fn test_decode_map_lower() {
-        let mut raw = vec![0u8; PNG_DATA_SIZE];
-        // Lower map at offset 0x1000 (shared with upper sprite sheet)
-        raw[0x1000] = 0xCD;
-        raw[0x1001] = 0xEF;
-
-        let mut cart = CartData::new();
-        decode_map(&raw, &mut cart);
-
-        // Lower map starts at row 32 in the map array
-        assert_eq!(cart.map[128 * 32], 0xCD);
-        assert_eq!(cart.map[128 * 32 + 1], 0xEF);
-    }
-
-    #[test]
-    fn test_decode_sfx() {
-        let mut raw = vec![0u8; PNG_DATA_SIZE];
-        // SFX at offset 0x3200, 68 bytes per SFX
-        let sfx_offset = 0x3200;
-        // SFX 0: mode=0, speed=16, loop_start=4, loop_end=8
-        raw[sfx_offset] = 0; // editor mode
-        raw[sfx_offset + 1] = 16; // speed
-        raw[sfx_offset + 2] = 4; // loop_start
-        raw[sfx_offset + 3] = 8; // loop_end
-
-        // Note 0: pitch=24 (0x18), waveform=3, volume=5, effect=2
-        // Encoded: bits 0-5 = 24 = 0x18, bits 6-8 = 3, bits 9-11 = 5, bits 12-14 = 2
-        // w = 24 | (3 << 6) | (5 << 9) | (2 << 12) = 24 | 192 | 2560 | 8192 = 10968
-        // = 0x2AD8 => low byte = 0xD8, high byte = 0x2A
-        let w: u16 = 24 | (3 << 6) | (5 << 9) | (2 << 12);
-        raw[sfx_offset + 4] = (w & 0xFF) as u8;
-        raw[sfx_offset + 5] = ((w >> 8) & 0xFF) as u8;
-
-        let mut cart = CartData::new();
-        decode_sfx(&raw, &mut cart);
-
-        assert_eq!(cart.sfx[0].speed, 16);
-        assert_eq!(cart.sfx[0].loop_start, 4);
-        assert_eq!(cart.sfx[0].loop_end, 8);
-        assert_eq!(cart.sfx[0].notes[0].pitch, 24);
-        assert_eq!(cart.sfx[0].notes[0].waveform, 3);
-        assert_eq!(cart.sfx[0].notes[0].volume, 5);
-        assert_eq!(cart.sfx[0].notes[0].effect, 2);
-    }
-
-    #[test]
-    fn test_decode_music() {
-        let mut raw = vec![0u8; PNG_DATA_SIZE];
-        // Music at offset 0x3100, 4 bytes per pattern
-        let music_offset = 0x3100;
-
-        // Pattern 0: loop start, channels 0=SFX 1, 1=SFX 2, 2=disabled, 3=SFX 5
-        raw[music_offset] = 0x80 | 1; // bit 7 = loop start, SFX index 1
-        raw[music_offset + 1] = 2; // SFX index 2
-        raw[music_offset + 2] = 0x40; // bit 6 = disabled
-        raw[music_offset + 3] = 5; // SFX index 5
-
-        let mut cart = CartData::new();
-        decode_music(&raw, &mut cart);
-
-        assert!(cart.music[0].is_loop_start());
-        assert!(!cart.music[0].is_loop_end());
-        assert!(!cart.music[0].is_stop());
-        assert!(cart.music[0].channel_enabled(0));
-        assert_eq!(cart.music[0].sfx_index(0), 1);
-        assert!(cart.music[0].channel_enabled(1));
-        assert_eq!(cart.music[0].sfx_index(1), 2);
-        assert!(!cart.music[0].channel_enabled(2)); // disabled
-        assert!(cart.music[0].channel_enabled(3));
-        assert_eq!(cart.music[0].sfx_index(3), 5);
-    }
-
-    #[test]
-    fn test_bit_reader() {
-        // 0xA5 = 10100101, 0x3C = 00111100
-        let data = [0xA5u8, 0x3C];
-        let mut reader = BitReader::new(&data);
-
-        // Read 1 bit at a time from 0xA5
-        assert_eq!(reader.read_bits(1), Some(1)); // 1
-        assert_eq!(reader.read_bits(1), Some(0)); // 0
-        assert_eq!(reader.read_bits(1), Some(1)); // 1
-        assert_eq!(reader.read_bits(1), Some(0)); // 0
-        assert_eq!(reader.read_bits(1), Some(0)); // 0
-        assert_eq!(reader.read_bits(1), Some(1)); // 1
-        assert_eq!(reader.read_bits(1), Some(0)); // 0
-        assert_eq!(reader.read_bits(1), Some(1)); // 1
-
-        // Now reading from 0x3C = 00111100
-        assert_eq!(reader.read_bits(4), Some(0b0011)); // 3
-        assert_eq!(reader.read_bits(4), Some(0b1100)); // 12
-    }
-
-    #[test]
-    fn test_bit_reader_multi_bit() {
-        // 0xA5 = 10100101
-        let data = [0xA5u8];
-        let mut reader = BitReader::new(&data);
-
-        assert_eq!(reader.read_bits(4), Some(0b1010)); // top 4 bits
-        assert_eq!(reader.read_bits(4), Some(0b0101)); // bottom 4 bits
-    }
-
-    #[test]
-    fn test_bit_reader_eof() {
-        let data = [0xFFu8];
-        let mut reader = BitReader::new(&data);
-
-        assert_eq!(reader.read_bits(8), Some(0xFF));
-        assert_eq!(reader.read_bits(1), None); // EOF
-    }
-
-    #[test]
-    fn test_full_png_roundtrip() {
-        // Create a raw data buffer with known sprite and flag data
-        let mut pixels = [0u8; PNG_DATA_SIZE];
-
-        // Write some GFX data: pixel pair (5, 10) at position 0
-        pixels[0x0000] = 0xA5; // low nibble = 5, high nibble = 10
-
-        // Write some flag data at 0x3000
-        pixels[0x3000] = 0x07;
-
-        // Write map data at 0x2000
-        pixels[0x2000] = 0x42;
-
-        // Encode as PNG
-        let png_bytes = make_test_png(&pixels);
-
-        // Parse
+        let png_bytes = make_cart_png(&mem);
         let cart = parse_p8_png(&png_bytes).unwrap();
 
-        // Check GFX decoding
         assert_eq!(cart.sprites[0], 5);
         assert_eq!(cart.sprites[1], 10);
-
-        // Check flags decoding
-        assert_eq!(cart.flags[0], 0x07);
-
-        // Check map decoding
         assert_eq!(cart.map[0], 0x42);
+        assert_eq!(cart.flags[0], 0x07);
+        assert_eq!(cart.code, "print(1)");
+    }
+
+    #[test]
+    fn test_legacy_decompress_roundtrip() {
+        // Build a `:c:\0` stream for a string using only literal table chars
+        // and one back-reference, then verify it decompresses correctly.
+        // "abcabc": a,b,c literals then back-ref offset 3 length 3.
+        let target = "abcabc";
+        // table indices: 'a'..'z' start after "\n 0123456789" (12 entries),
+        // so 'a' = index 12 -> code 13.
+        let a = 13u8;
+        let mut stream = Vec::new();
+        stream.extend_from_slice(b":c:\0");
+        stream.push((target.len() >> 8) as u8); // length MSB
+        stream.push((target.len() & 0xFF) as u8); // length LSB
+        stream.push(0);
+        stream.push(0);
+        stream.push(a); // 'a'
+        stream.push(a + 1); // 'b'
+        stream.push(a + 2); // 'c'
+                            // back-ref: offset 3, length 3 -> first byte 0x3C + offset/16,
+                            // second byte (offset%16) | ((len-2)<<4)
+        let offset = 3usize;
+        let len = 3usize;
+        stream.push(0x3C + (offset / 16) as u8);
+        stream.push(((offset % 16) as u8) | (((len - 2) as u8) << 4));
+
+        let got = decompress_code_legacy(&stream).unwrap();
+        assert_eq!(got, target);
     }
 
     #[test]
     fn test_invalid_png() {
-        let result = parse_p8_png(b"not a png");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_decode_sfx_max_values() {
-        let mut raw = vec![0u8; PNG_DATA_SIZE];
-        let sfx_offset = 0x3200;
-        raw[sfx_offset + 1] = 0xFF; // max speed
-        raw[sfx_offset + 2] = 31; // max loop_start
-        raw[sfx_offset + 3] = 31; // max loop_end
-
-        // Note with max values: pitch=63, waveform=7, volume=7, effect=7
-        let w: u16 = 63 | (7 << 6) | (7 << 9) | (7 << 12);
-        raw[sfx_offset + 4] = (w & 0xFF) as u8;
-        raw[sfx_offset + 5] = ((w >> 8) & 0xFF) as u8;
-
-        let mut cart = CartData::new();
-        decode_sfx(&raw, &mut cart);
-
-        assert_eq!(cart.sfx[0].speed, 0xFF);
-        assert_eq!(cart.sfx[0].loop_start, 31);
-        assert_eq!(cart.sfx[0].loop_end, 31);
-        assert_eq!(cart.sfx[0].notes[0].pitch, 63);
-        assert_eq!(cart.sfx[0].notes[0].waveform, 7);
-        assert_eq!(cart.sfx[0].notes[0].volume, 7);
-        assert_eq!(cart.sfx[0].notes[0].effect, 7);
-    }
-
-    #[test]
-    fn test_decode_music_all_flags() {
-        let mut raw = vec![0u8; PNG_DATA_SIZE];
-        let base = 0x3100;
-
-        // Pattern 0: loop start
-        raw[base] = 0x80; // loop start flag
-        raw[base + 1] = 0;
-        raw[base + 2] = 0;
-        raw[base + 3] = 0;
-
-        // Pattern 1: loop end
-        raw[base + 4] = 0;
-        raw[base + 5] = 0x80; // loop end flag
-        raw[base + 6] = 0;
-        raw[base + 7] = 0;
-
-        // Pattern 2: stop
-        raw[base + 8] = 0;
-        raw[base + 9] = 0;
-        raw[base + 10] = 0x80; // stop flag
-        raw[base + 11] = 0;
-
-        let mut cart = CartData::new();
-        decode_music(&raw, &mut cart);
-
-        assert!(cart.music[0].is_loop_start());
-        assert!(!cart.music[0].is_loop_end());
-        assert!(!cart.music[0].is_stop());
-
-        assert!(!cart.music[1].is_loop_start());
-        assert!(cart.music[1].is_loop_end());
-        assert!(!cart.music[1].is_stop());
-
-        assert!(!cart.music[2].is_loop_start());
-        assert!(!cart.music[2].is_loop_end());
-        assert!(cart.music[2].is_stop());
+        assert!(parse_p8_png(b"not a png").is_err());
     }
 }

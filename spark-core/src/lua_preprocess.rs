@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -49,6 +50,10 @@ where
 const INCLUDE_MAX_DEPTH: usize = 16;
 
 /// Inner recursive function for include processing.
+///
+/// Memory: the include and continuation phases return the input *borrowed*
+/// when they have nothing to do, so the common case holds only the source and
+/// the output (not four full copies).
 fn preprocess_with_includes_inner<F>(
     code: &str,
     resolve_include: &F,
@@ -83,8 +88,7 @@ where
                 output.push_str(inside_part);
                 // Process the remainder of the line normally (it may contain code).
                 if !rest.is_empty() {
-                    let processed_rest = process_line_normal(rest);
-                    output.push_str(&processed_rest);
+                    output.push_str(&process_line_normal(rest));
                 }
                 output.push('\n');
             } else {
@@ -113,22 +117,19 @@ where
                 let rest = &after_open[close_end..];
 
                 // Process the part before the open delimiter.
-                let processed_before = process_line_normal(before);
-                output.push_str(&processed_before);
+                output.push_str(&process_line_normal(before));
                 // Emit the opening delimiter + content + closing delimiter as-is.
                 output.push_str(&from_open[..delim_len]);
                 output.push_str(inside_and_close);
                 // Process any remainder after the closing delimiter.
                 if !rest.is_empty() {
-                    let processed_rest = process_line_normal(rest);
-                    output.push_str(&processed_rest);
+                    output.push_str(&process_line_normal(rest));
                 }
                 output.push('\n');
             } else {
                 // Multi-line block opens but does not close on this line.
                 multiline_depth = Some(eq_count);
-                let processed_before = process_line_normal(before);
-                output.push_str(&processed_before);
+                output.push_str(&process_line_normal(before));
                 output.push_str(from_open);
                 output.push('\n');
             }
@@ -136,8 +137,7 @@ where
         }
 
         // No multi-line block involvement; process normally.
-        let processed = process_line_normal(line);
-        output.push_str(&processed);
+        output.push_str(&process_line_normal(line));
         output.push('\n');
     }
     output
@@ -148,15 +148,20 @@ where
 /// Scans line-by-line, respecting string literals and comments. When a line
 /// (outside strings/comments) matches `#include <filename>`, the resolver is
 /// called and the line is replaced with the (recursively preprocessed) content.
-fn resolve_includes<F>(
-    code: &str,
+/// Returns the source borrowed when it contains no `#include` at all.
+fn resolve_includes<'a, F>(
+    code: &'a str,
     resolve_include: &F,
     seen: &mut BTreeSet<String>,
     depth: usize,
-) -> String
+) -> Cow<'a, str>
 where
     F: Fn(&str) -> Option<String>,
 {
+    if !code.contains("#include") {
+        return Cow::Borrowed(code);
+    }
+
     let mut output = String::with_capacity(code.len());
     let mut multiline_depth: Option<usize> = None;
 
@@ -189,33 +194,33 @@ where
             if depth >= INCLUDE_MAX_DEPTH {
                 // Depth limit exceeded; emit a comment.
                 output.push_str("-- #include depth limit exceeded: ");
-                output.push_str(&filename);
+                output.push_str(filename);
                 output.push('\n');
                 continue;
             }
 
-            if seen.contains(&filename) {
+            if seen.contains(filename) {
                 // Cycle detected; emit a comment.
                 output.push_str("-- #include cycle detected: ");
-                output.push_str(&filename);
+                output.push_str(filename);
                 output.push('\n');
                 continue;
             }
 
-            if let Some(contents) = resolve_include(&filename) {
+            if let Some(contents) = resolve_include(filename) {
                 // Mark as seen for cycle detection.
-                seen.insert(filename.clone());
+                seen.insert(filename.to_string());
                 // Recursively process the included content.
                 let processed =
                     preprocess_with_includes_inner(&contents, resolve_include, seen, depth + 1);
                 output.push_str(&processed);
                 // Remove from seen after processing so the same file can be
                 // included from independent branches (but not from itself).
-                seen.remove(&filename);
+                seen.remove(filename);
             } else {
                 // Resolver returned None; emit a comment.
                 output.push_str("-- #include not found: ");
-                output.push_str(&filename);
+                output.push_str(filename);
                 output.push('\n');
             }
             continue;
@@ -226,7 +231,7 @@ where
         output.push('\n');
     }
 
-    output
+    Cow::Owned(output)
 }
 
 /// Parse a `#include` directive from a line, returning the filename if matched.
@@ -236,28 +241,17 @@ where
 /// - `#include "filename.lua"`
 /// - `#include <filename.lua>`
 /// - Leading whitespace is allowed.
-/// - The `#include` must not be inside a string literal or comment on the line.
-fn parse_include_directive(line: &str) -> Option<String> {
+///
+/// Because the directive must be the first thing on the line, it can never be
+/// inside a string literal or comment.
+fn parse_include_directive(line: &str) -> Option<&str> {
     let trimmed = line.trim();
 
-    // Quick check: must start with #include
-    if !trimmed.starts_with("#include") {
-        return None;
-    }
-
-    // Verify it's not inside a string or comment by checking that the `#`
-    // is at the code level. Walk the line up to the `#` position.
-    let hash_pos = line.find('#')?;
-    let prefix = &line[..hash_pos];
-    if is_inside_string_or_comment(prefix) {
-        return None;
-    }
-
     // Extract the part after `#include`
-    let after_include = &trimmed["#include".len()..];
+    let after_include = trimmed.strip_prefix("#include")?;
 
     // Must be followed by whitespace
-    if after_include.is_empty() || !after_include.starts_with(|c: char| c.is_ascii_whitespace()) {
+    if !after_include.starts_with(|c: char| c.is_ascii_whitespace()) {
         return None;
     }
 
@@ -281,67 +275,1002 @@ fn parse_include_directive(line: &str) -> Option<String> {
         return None;
     }
 
-    Some(filename.to_string())
+    Some(filename)
 }
 
-/// Check if the end of `prefix` is inside a string literal or after a comment start.
-fn is_inside_string_or_comment(prefix: &str) -> bool {
-    let mut in_string: Option<char> = None;
-    let chars: Vec<char> = prefix.chars().collect();
-    let mut i = 0;
+// ---------------------------------------------------------------------------
+// Shared lexical scanner
+// ---------------------------------------------------------------------------
 
-    while i < chars.len() {
-        let ch = chars[i];
+/// Classification of a byte range of a single line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SpanKind {
+    /// Plain code: transforms apply here.
+    Code,
+    /// A complete `"..."` / `'...'` literal, delimiters included.
+    Str,
+    /// A string literal that runs to the end of the line without closing.
+    UnterminatedStr,
+    /// A `--` comment: from the dashes to the end of the line.
+    Comment,
+}
 
-        if let Some(delim) = in_string {
-            if ch == '\\' && i + 1 < chars.len() {
+/// A byte range `[start, end)` of a line with its classification. Boundaries
+/// always fall on ASCII bytes (quotes, `--`, line end) so they are valid
+/// `str` slice indices even when the line contains multibyte UTF-8.
+#[derive(Clone, Copy, Debug)]
+struct Span {
+    start: usize,
+    end: usize,
+    kind: SpanKind,
+}
+
+/// The one string/comment state machine shared by every per-line pass.
+///
+/// Rules (PICO-8 single-line lexing):
+///  - `'…'` and `"…"` literals; a backslash escapes the next byte.
+///  - `--` outside a string starts a comment that runs to the end of line.
+///  - Long brackets (`[[…]]`) are handled by the multi-line driver before a
+///    line reaches the per-line passes, so they are not tracked here
+///    (`find_multiline_open` detects them on top of the code spans).
+struct Spans<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Spans<'a> {
+    fn new(line: &'a str) -> Self {
+        Spans {
+            bytes: line.as_bytes(),
+            pos: 0,
+        }
+    }
+
+    /// Start scanning at `start`, which must be a code-level byte position.
+    fn from(line: &'a str, start: usize) -> Self {
+        Spans {
+            bytes: line.as_bytes(),
+            pos: start,
+        }
+    }
+
+    /// Only the code spans.
+    fn code(self) -> impl Iterator<Item = Span> + 'a {
+        self.filter(|s| s.kind == SpanKind::Code)
+    }
+}
+
+impl Iterator for Spans<'_> {
+    type Item = Span;
+
+    fn next(&mut self) -> Option<Span> {
+        let b = self.bytes;
+        let n = b.len();
+        let start = self.pos;
+        if start >= n {
+            return None;
+        }
+        match b[start] {
+            q @ (b'"' | b'\'') => {
+                let mut i = start + 1;
+                while i < n {
+                    if b[i] == b'\\' && i + 1 < n {
+                        i += 2;
+                        continue;
+                    }
+                    if b[i] == q {
+                        self.pos = i + 1;
+                        return Some(Span {
+                            start,
+                            end: i + 1,
+                            kind: SpanKind::Str,
+                        });
+                    }
+                    i += 1;
+                }
+                self.pos = n;
+                Some(Span {
+                    start,
+                    end: n,
+                    kind: SpanKind::UnterminatedStr,
+                })
+            }
+            b'-' if start + 1 < n && b[start + 1] == b'-' => {
+                self.pos = n;
+                Some(Span {
+                    start,
+                    end: n,
+                    kind: SpanKind::Comment,
+                })
+            }
+            _ => {
+                let mut i = start + 1;
+                while i < n {
+                    match b[i] {
+                        b'"' | b'\'' => break,
+                        b'-' if i + 1 < n && b[i + 1] == b'-' => break,
+                        _ => i += 1,
+                    }
+                }
+                self.pos = i;
+                Some(Span {
+                    start,
+                    end: i,
+                    kind: SpanKind::Code,
+                })
+            }
+        }
+    }
+}
+
+/// Byte offset of the first occurrence of `needle` at code level, or `None`.
+fn find_in_code(line: &str, needle: &str) -> Option<usize> {
+    Spans::new(line)
+        .code()
+        .find_map(|s| line[s.start..s.end].find(needle).map(|k| s.start + k))
+}
+
+/// Does any code span contain byte `b`?
+fn code_contains_byte(line: &str, b: u8) -> bool {
+    let bytes = line.as_bytes();
+    Spans::new(line)
+        .code()
+        .any(|s| bytes[s.start..s.end].contains(&b))
+}
+
+// ---------------------------------------------------------------------------
+// Per-line passes
+// ---------------------------------------------------------------------------
+
+/// Convert a PICO-8 `//` single-line comment to a Lua `--` comment.
+///
+/// The first `//` found at code level (before any `--`, which already starts
+/// a comment) is replaced with `--` and the rest of the line is kept verbatim
+/// as comment text. If no such `//` exists the line is returned unchanged.
+fn convert_double_slash_comment(line: &str) -> Cow<'_, str> {
+    if !line.contains("//") {
+        return Cow::Borrowed(line);
+    }
+    match find_in_code(line, "//") {
+        Some(k) => {
+            let mut out = String::with_capacity(line.len());
+            out.push_str(&line[..k]);
+            out.push_str("--");
+            out.push_str(&line[k + 2..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(line),
+    }
+}
+
+/// Convert PICO-8's `\` integer-division operator to Lua's `//`.
+///
+/// String- and comment-aware. Leaves `\=` untouched (the compound-assignment
+/// pass turns `x \= n` into `x = x // (n)`), and leaves `\` inside string
+/// literals (escape sequences) and after a `--` comment alone. Any remaining
+/// end-of-line continuation `\` has already been removed by
+/// [`join_backslash_lines`] before this runs.
+fn convert_backslash_idiv(line: &str) -> Cow<'_, str> {
+    if !line.contains('\\') || !code_contains_byte(line, b'\\') {
+        return Cow::Borrowed(line);
+    }
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len() + 4);
+    let mut copied = 0usize;
+    for span in Spans::new(line).code() {
+        let mut i = span.start;
+        while i < span.end {
+            // `\=` is compound integer-division-assign; leave for that pass.
+            if bytes[i] == b'\\' && !(i + 1 < bytes.len() && bytes[i + 1] == b'=') {
+                out.push_str(&line[copied..i]);
+                out.push_str("//");
+                copied = i + 1;
+            }
+            i += 1;
+        }
+    }
+    out.push_str(&line[copied..]);
+    Cow::Owned(out)
+}
+
+/// Convert PICO-8's custom string-escape sequences to standard Lua escapes
+/// inside string literals. PICO-8 (z8lua llex.c) maps these P8SCII control
+/// escapes that Lua 5.4 rejects:
+///   `\*`->\1  `\#`->\2  `\-`->\3  `\|`->\4  `\+`->\5  `\^`->\6
+/// Only the interior of `"..."`/`'...'` literals is rewritten; a `\\` escapes
+/// the backslash so `\\*` is left as a literal backslash + `*`.
+fn convert_string_escapes(line: &str) -> Cow<'_, str> {
+    // Cheap reject: a backslash is required for any custom escape.
+    if !line.contains('\\') {
+        return Cow::Borrowed(line);
+    }
+    // Map to a fixed 2-digit hex escape (`\xNN`) rather than a decimal
+    // escape: a decimal `\1` would merge with a following digit (`"\*4"` must
+    // be char 1 + '4', not char 14), whereas `\x01` is exactly two hex digits
+    // and cannot absorb more.
+    fn mapped(next: u8) -> Option<&'static str> {
+        Some(match next {
+            b'*' => "\\x01",
+            b'#' => "\\x02",
+            b'-' => "\\x03",
+            b'|' => "\\x04",
+            b'+' => "\\x05",
+            b'^' => "\\x06",
+            _ => return None,
+        })
+    }
+    let bytes = line.as_bytes();
+    let mut out: Option<String> = None;
+    let mut copied = 0usize;
+    for span in Spans::new(line) {
+        if !matches!(span.kind, SpanKind::Str | SpanKind::UnterminatedStr) {
+            continue;
+        }
+        // Interior only: skip the opening quote.
+        let mut i = span.start + 1;
+        while i < span.end {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                if let Some(esc) = mapped(bytes[i + 1]) {
+                    let out = out.get_or_insert_with(|| String::with_capacity(line.len() + 8));
+                    out.push_str(&line[copied..i]);
+                    out.push_str(esc);
+                    copied = i + 2;
+                }
+                // Any other escape (incl. `\\`, `\"`, `\n`, `\x`, `\ddd`) is
+                // kept verbatim so its own meaning is preserved.
                 i += 2;
                 continue;
             }
-            if ch == delim {
-                in_string = None;
-            }
             i += 1;
-            continue;
         }
-
-        if ch == '"' || ch == '\'' {
-            in_string = Some(ch);
-            i += 1;
-            continue;
-        }
-
-        if ch == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            // Rest is a comment
-            return true;
-        }
-
-        i += 1;
     }
-
-    in_string.is_some()
+    match out {
+        Some(mut out) => {
+            out.push_str(&line[copied..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(line),
+    }
 }
 
-/// Process a single line with all PICO-8 transforms (no multi-line string state).
-fn process_line_normal(line: &str) -> String {
+/// Convert PICO-8 binary number literals (`0b1010`, `0B11`, `0b0101.1`) to
+/// their decimal value, which Lua 5.4 accepts. String- and comment-aware. A
+/// `0b` is only treated as a literal when it begins a number token (the byte
+/// before it is not an identifier char or `.`), so `x0b1` / `a.0b` are left
+/// alone. Bails on a malformed literal by leaving it unchanged.
+fn convert_binary_literals(line: &str) -> Cow<'_, str> {
+    // Cheap reject: needs a '0' followed by b/B somewhere.
+    if !line.contains("0b") && !line.contains("0B") {
+        return Cow::Borrowed(line);
+    }
+    let bytes = line.as_bytes();
+    let mut out: Option<String> = None;
+    let mut copied = 0usize;
+    for span in Spans::new(line).code() {
+        let mut i = span.start;
+        while i + 1 < span.end {
+            // A binary literal: `0` then `b`/`B`, at a number-token boundary.
+            if bytes[i] == b'0'
+                && (bytes[i + 1] == b'b' || bytes[i + 1] == b'B')
+                && !preceded_by_ident_byte(bytes, i)
+            {
+                // Collect binary digits and an optional fractional part.
+                let start_digits = i + 2;
+                let mut j = start_digits;
+                while j < span.end && matches!(bytes[j], b'0' | b'1' | b'.') {
+                    j += 1;
+                }
+                let lit = &line[start_digits..j];
+                // Parse via the shared PICO-8 number parser (handles the fraction).
+                if !lit.is_empty() {
+                    if let Some(v) = crate::api_ops::parse_pico8_number(&format!("0b{lit}")) {
+                        let out = out.get_or_insert_with(|| String::with_capacity(line.len()));
+                        out.push_str(&line[copied..i]);
+                        // Emit a plain decimal. Integers stay integer-looking.
+                        if v == (v as i64) as f64 {
+                            out.push_str(&format!("{}", v as i64));
+                        } else {
+                            out.push_str(&format!("{v}"));
+                        }
+                        copied = j;
+                        i = j;
+                        continue;
+                    }
+                }
+                // Malformed: leave the original characters as-is.
+            }
+            i += 1;
+        }
+    }
+    match out {
+        Some(mut out) => {
+            out.push_str(&line[copied..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(line),
+    }
+}
+
+/// True if the byte before index `i` is part of an identifier or a number
+/// (so a `0b` there is NOT the start of a fresh numeric literal).
+fn preceded_by_ident_byte(bytes: &[u8], i: usize) -> bool {
+    if i == 0 {
+        return false;
+    }
+    let c = bytes[i - 1];
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'.'
+}
+
+/// PICO-8's six button glyphs are predefined globals (z8lua bios / fake-08
+/// `p8GlobalLuaFunctions.h`): ⬅️=0 ➡️=1 ⬆️=2 ⬇️=3 🅾️=4 ❎=5. Listed without
+/// the U+FE0F variation selector, which carts may or may not include.
+const BUTTON_GLYPHS: &[(&str, &str)] = &[
+    ("\u{2b05}", "0"),  // ⬅️
+    ("\u{27a1}", "1"),  // ➡️
+    ("\u{2b06}", "2"),  // ⬆️
+    ("\u{2b07}", "3"),  // ⬇️
+    ("\u{1f17e}", "4"), // 🅾️
+    ("\u{274e}", "5"),  // ❎
+];
+
+/// Replace PICO-8 button glyphs used as identifiers (`btn(⬅️)`) with their
+/// numeric literal, since Lua 5.4 cannot lex them. Code spans only — glyphs
+/// inside strings (`print("⬅️")`) and comments are untouched. A glyph glued
+/// to identifier characters (`x⬅️`) is left alone rather than being fused
+/// into a different token.
+fn convert_button_glyphs(line: &str) -> Cow<'_, str> {
+    if line.is_ascii() {
+        return Cow::Borrowed(line);
+    }
+    const VS16: &str = "\u{fe0f}";
+    let bytes = line.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut out: Option<String> = None;
+    let mut copied = 0usize;
+    for span in Spans::new(line).code() {
+        let mut i = span.start;
+        while i < span.end {
+            if bytes[i] < 0x80 {
+                i += 1;
+                continue;
+            }
+            let rest = &line[i..span.end];
+            let hit = BUTTON_GLYPHS
+                .iter()
+                .find(|(glyph, _)| rest.starts_with(glyph));
+            let Some((glyph, literal)) = hit else {
+                // Some other multibyte char: step over it whole.
+                i += rest.chars().next().map_or(1, char::len_utf8);
+                continue;
+            };
+            let mut end = i + glyph.len();
+            if line[end..span.end].starts_with(VS16) {
+                end += VS16.len();
+            }
+            let glued =
+                (i > 0 && is_ident(bytes[i - 1])) || (end < bytes.len() && is_ident(bytes[end]));
+            if !glued {
+                let out = out.get_or_insert_with(|| String::with_capacity(line.len()));
+                out.push_str(&line[copied..i]);
+                out.push_str(literal);
+                copied = end;
+            }
+            i = end;
+        }
+    }
+    match out {
+        Some(mut out) => {
+            out.push_str(&line[copied..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(line),
+    }
+}
+
+/// PICO-8 infix operators with no Lua 5.4 equivalent, mapped to API functions.
+/// Native Lua ops (`<<`, `>>`, `&`, `|`) are deliberately absent — they pass
+/// through. Listed longest-first so the matcher can't mistake `>>>` for `>>`.
+/// The number is the PICO-8 operator precedence (z8lua lparser.c priority[]):
+/// `^^` is 5, the shifts/rotates are 7.
+const INFIX_BITOPS: &[(&str, &str, u8)] = &[
+    (">>>", "lshr", 7),
+    ("<<>", "rotl", 7),
+    (">><", "rotr", 7),
+    ("^^", "bxor", 5),
+];
+
+/// Concatenate a token range into one owned string.
+fn join_toks(toks: &[Tok<'_>]) -> String {
+    let mut out = String::with_capacity(toks.iter().map(|t| t.text.len()).sum());
+    for tk in toks {
+        out.push_str(&tk.text);
+    }
+    out
+}
+
+/// Replace `toks[range]` with a single synthesized `Group` token `text`. A
+/// call expression is an atom, exactly what re-tokenizing the rebuilt line
+/// would have produced for operand-delimiting purposes, so no re-lex is needed.
+fn splice_group(toks: &mut Vec<Tok<'_>>, range: core::ops::Range<usize>, text: String) {
+    toks.splice(
+        range,
+        core::iter::once(Tok {
+            text: Cow::Owned(text),
+            kind: TokKind::Group,
+        }),
+    );
+}
+
+/// Rewrite PICO-8-only infix bitwise operators (`>>>`, `<<>`, `>><`, `^^`) into
+/// API function calls, e.g. `a >>> b` -> `lshr(a, b)`.
+///
+/// Correctness over cleverness: operands are delimited by scanning outward
+/// until a token whose precedence is **lower** than the operator's (or a
+/// statement/grouping boundary). If an operand cannot be confidently delimited,
+/// the line is returned **unchanged** — a visible Lua syntax error is far
+/// better than silently miscomputing. Processes one operator occurrence per
+/// pass, highest precedence first, until none remain.
+fn convert_infix_bitops(line: &str) -> Cow<'_, str> {
+    // Fast path: none of the target operators present.
+    if !INFIX_BITOPS.iter().any(|(op, _, _)| line.contains(op)) {
+        return Cow::Borrowed(line);
+    }
+
+    let mut toks = match tokenize_lua_line(line) {
+        Some(t) => t,
+        None => return Cow::Borrowed(line), // tokenizer bailed (unterminated string, etc.)
+    };
+
+    // Repeatedly rewrite the highest-precedence target operator until none are
+    // left. Each rewrite collapses the operands + operator into one Group token.
+    let mut changed = false;
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 64 {
+            return Cow::Borrowed(line); // pathological; bail to unchanged
+        }
+        // Find the target operator token to rewrite: highest precedence first,
+        // leftmost at that precedence.
+        let mut target: Option<(usize, &'static str, u8)> = None;
+        for (ti, tk) in toks.iter().enumerate() {
+            if let TokKind::Op = tk.kind {
+                if let Some((_, func, prec)) =
+                    INFIX_BITOPS.iter().find(|(op, _, _)| *op == &*tk.text)
+                {
+                    let better = match target {
+                        None => true,
+                        Some((_, _, p)) => *prec > p,
+                    };
+                    if better {
+                        target = Some((ti, func, *prec));
+                    }
+                }
+            }
+        }
+        let (op_idx, func, prec) = match target {
+            Some(t) => t,
+            None => {
+                return if changed {
+                    Cow::Owned(join_toks(&toks))
+                } else {
+                    Cow::Borrowed(line)
+                };
+            }
+        };
+
+        // Delimit operands by precedence.
+        let left = match operand_span_left(&toks, op_idx, prec) {
+            Some(r) => r,
+            None => return Cow::Borrowed(line),
+        };
+        let right = match operand_span_right(&toks, op_idx, prec) {
+            Some(r) => r,
+            None => return Cow::Borrowed(line),
+        };
+
+        // Rebuild: "func(" + left.. + ", " + right.. + ")"
+        let mut call = String::new();
+        call.push_str(func);
+        call.push('(');
+        call.push_str(&join_toks(&toks[left.0..op_idx]));
+        call.push_str(", ");
+        call.push_str(&join_toks(&toks[op_idx + 1..right.1]));
+        call.push(')');
+        splice_group(&mut toks, left.0..right.1, call);
+        changed = true;
+    }
+}
+
+/// Rewrite PICO-8 unary peek operators into function calls:
+/// `@addr` -> `peek(addr)`, `%addr` -> `peek2(addr)`, `$addr` -> `peek4(addr)`.
+///
+/// These are unary prefix operators with priority 12 (z8lua), so they bind a
+/// single high-precedence term (an atom plus postfix indexing/calls and any
+/// leading sign), NOT a full expression: `@a+1` is `peek(a)+1`, `@(a+1)` is
+/// `peek((a+1))`. `%` is only peek2 in prefix position — as a binary operator
+/// it is modulo, which we leave alone.
+///
+/// Innermost-first (rightmost operator) so nested `@@a` -> `peek(peek(a))`
+/// builds correctly. Bails to the unchanged line if an operand can't be found.
+fn convert_unary_peek(line: &str) -> Cow<'_, str> {
+    if !line.contains('@') && !line.contains('$') && !line.contains('%') {
+        return Cow::Borrowed(line);
+    }
+    let mut toks = match tokenize_lua_line(line) {
+        Some(t) => t,
+        None => return Cow::Borrowed(line),
+    };
+    let mut changed = false;
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        if guard > 64 {
+            return Cow::Borrowed(line);
+        }
+
+        // Find the RIGHTMOST peek operator that is in prefix position, so nested
+        // peeks resolve inside-out.
+        let mut found: Option<(usize, &'static str)> = None;
+        for (ti, tk) in toks.iter().enumerate() {
+            if tk.kind != TokKind::Op {
+                continue;
+            }
+            let func = match &*tk.text {
+                "@" => "peek",
+                "$" => "peek4",
+                "%" if is_prefix_position(&toks, ti) => "peek2",
+                _ => continue,
+            };
+            found = Some((ti, func)); // keep last (rightmost)
+        }
+        let (op_idx, func) = match found {
+            Some(f) => f,
+            None => {
+                return if changed {
+                    Cow::Owned(join_toks(&toks))
+                } else {
+                    Cow::Borrowed(line)
+                };
+            }
+        };
+
+        // The operand is the unary term to the right (priority 12).
+        let span = match unary_operand_span(&toks, op_idx) {
+            Some(s) => s,
+            None => return Cow::Borrowed(line),
+        };
+
+        let mut call = String::new();
+        call.push_str(func);
+        call.push('(');
+        call.push_str(&join_toks(&toks[op_idx + 1..span]));
+        call.push(')');
+        splice_group(&mut toks, op_idx..span, call);
+        changed = true;
+    }
+}
+
+/// True if the operator token at `idx` is in prefix (unary) position: the
+/// previous non-space token is absent, an operator, an open boundary, or a
+/// keyword — i.e. not a value that `%` could be a binary modulo of.
+fn is_prefix_position(toks: &[Tok<'_>], idx: usize) -> bool {
+    let mut j = idx;
+    while j > 0 {
+        let t = &toks[j - 1];
+        match t.kind {
+            TokKind::Space => {
+                j -= 1;
+            }
+            TokKind::Op => return true,
+            TokKind::Comment => return true,
+            TokKind::Word => return is_boundary_keyword(&t.text),
+            // A value (string / parenthesized group / number) precedes: binary.
+            TokKind::Str | TokKind::Group => return false,
+        }
+    }
+    true // start of line
+}
+
+/// Span `(op_idx, end)` of a unary operand: optional leading sign/peek tokens
+/// then one atom (Word/Str/Group) plus trailing postfix groups (`[...]`,
+/// `(...)`, and `.field` which tokenizes as part of the Word). Returns the end
+/// index (exclusive). `None` if no atom follows.
+fn unary_operand_span(toks: &[Tok<'_>], op_idx: usize) -> Option<usize> {
+    let n = toks.len();
+    let mut j = op_idx + 1;
+    // Skip whitespace.
+    while j < n && toks[j].kind == TokKind::Space {
+        j += 1;
+    }
+    // Allow stacked unary prefix operators: @, $, %, -, ~, #, not.
+    while j < n {
+        let t = &toks[j];
+        let is_unary = match t.kind {
+            TokKind::Op => matches!(&*t.text, "@" | "$" | "%" | "-" | "~" | "#"),
+            TokKind::Word => t.text == "not",
+            _ => false,
+        };
+        if is_unary {
+            j += 1;
+            while j < n && toks[j].kind == TokKind::Space {
+                j += 1;
+            }
+        } else {
+            break;
+        }
+    }
+    // The atom.
+    if j >= n {
+        return None;
+    }
+    match toks[j].kind {
+        TokKind::Word | TokKind::Str | TokKind::Group => {
+            j += 1;
+        }
+        _ => return None,
+    }
+    // Trailing postfix groups: indexing `[...]` or calls `(...)`. (`.field`
+    // attaches to the Word token already.)
+    while j < n && toks[j].kind == TokKind::Group {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// A lexical token of a single Lua line (no multi-line constructs — those are
+/// handled by the caller). Whitespace is its own token so the original spacing
+/// round-trips when tokens are concatenated. Text borrows from the line except
+/// for groups synthesized by a rewrite.
+struct Tok<'a> {
+    text: Cow<'a, str>,
+    kind: TokKind,
+}
+
+#[derive(PartialEq)]
+enum TokKind {
+    /// Identifier, number, or keyword.
+    Word,
+    /// String literal (including quotes).
+    Str,
+    /// An operator or punctuation run (we keep multi-char ops whole).
+    Op,
+    /// A balanced `(...)`, `[...]`, or `{...}` group (kept as one token).
+    Group,
+    /// Whitespace.
+    Space,
+    /// A `--` comment and everything after it (verbatim, never an operand).
+    Comment,
+}
+
+/// Tokenize a single line for infix-operator rewriting. Returns `None` if the
+/// line has an unterminated string or unbalanced grouping (caller leaves the
+/// line unchanged). A `--` comment and everything after it is captured as one
+/// trailing `Comment` token so it is preserved verbatim.
+fn tokenize_lua_line(line: &str) -> Option<Vec<Tok<'_>>> {
+    let bytes = line.as_bytes();
+    let n = bytes.len();
+    let mut toks: Vec<Tok<'_>> = Vec::new();
+    let mut i = 0;
+    fn push<'a>(toks: &mut Vec<Tok<'a>>, line: &'a str, start: usize, end: usize, kind: TokKind) {
+        toks.push(Tok {
+            text: Cow::Borrowed(&line[start..end]),
+            kind,
+        });
+    }
+    while i < n {
+        let c = bytes[i];
+        // Comment: capture the rest verbatim.
+        if c == b'-' && i + 1 < n && bytes[i + 1] == b'-' {
+            push(&mut toks, line, i, n, TokKind::Comment);
+            return Some(toks);
+        }
+        // Whitespace run.
+        if c == b' ' || c == b'\t' {
+            let start = i;
+            while i < n && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                i += 1;
+            }
+            push(&mut toks, line, start, i, TokKind::Space);
+            continue;
+        }
+        // String literal.
+        if c == b'"' || c == b'\'' {
+            let span = Spans::from(line, i).next()?;
+            if span.kind != SpanKind::Str {
+                return None;
+            }
+            push(&mut toks, line, span.start, span.end, TokKind::Str);
+            i = span.end;
+            continue;
+        }
+        // Balanced group.
+        if c == b'(' || c == b'[' || c == b'{' {
+            let open = c;
+            let close = match c {
+                b'(' => b')',
+                b'[' => b']',
+                _ => b'}',
+            };
+            let start = i;
+            let mut depth = 0i32;
+            let mut end = None;
+            'scan: for span in Spans::from(line, i).code() {
+                for (off, &b) in bytes[span.start..span.end].iter().enumerate() {
+                    if b == open {
+                        depth += 1;
+                    } else if b == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(span.start + off + 1);
+                            break 'scan;
+                        }
+                    }
+                }
+            }
+            let end = end?; // unbalanced — bail
+            push(&mut toks, line, start, end, TokKind::Group);
+            i = end;
+            continue;
+        }
+        if c == b')' || c == b']' || c == b'}' {
+            // Unbalanced close at top level — bail.
+            return None;
+        }
+        // Word: identifier / number (numbers may contain '.', 'x', hex digits).
+        if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' {
+            let start = i;
+            while i < n
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'.')
+            {
+                i += 1;
+            }
+            push(&mut toks, line, start, i, TokKind::Word);
+            continue;
+        }
+        // Operator/punctuation run. Match the longest known multi-char operator
+        // first so `>>>`, `<<>`, `>><`, `^^`, `..`, `==`, etc. stay whole. A
+        // non-ASCII character becomes a single (whole-char) Op token.
+        let len = match_operator(&bytes[i..]).map_or_else(
+            || line[i..].chars().next().map_or(1, char::len_utf8),
+            str::len,
+        );
+        push(&mut toks, line, i, i + len, TokKind::Op);
+        i += len;
+    }
+    Some(toks)
+}
+
+/// Match the longest known operator at the start of `rest`.
+fn match_operator(rest: &[u8]) -> Option<&'static str> {
+    const OPS: &[&str] = &[
+        ">><", ">>>", "<<>", "<<", ">>", "..", "==", "~=", "<=", ">=", "^^", "//", "+", "-", "*",
+        "/", "%", "^", "&", "|", "~", "<", ">", "=", ",", ";", "#", ":", "@", "$",
+    ];
+    OPS.iter()
+        .copied()
+        .find(|op| rest.starts_with(op.as_bytes()))
+}
+
+/// Precedence of an operator token for operand-delimiting purposes, using the
+/// z8lua priority table. Returns `None` for non-operators / unknown tokens.
+/// Lower number = binds looser.
+fn op_precedence(text: &str) -> Option<u8> {
+    Some(match text {
+        "or" => 1,
+        "and" => 2,
+        "<" | ">" | "<=" | ">=" | "~=" | "==" => 3,
+        ".." => 9, // right-assoc; treated as higher than our ops (5/7)
+        "|" => 4,
+        "^^" => 5,
+        "&" => 6,
+        "<<" | ">>" | ">>>" | "<<>" | ">><" => 7,
+        "+" | "-" => 10,
+        "*" | "/" | "%" | "\\" | "//" => 11,
+        "^" => 12,
+        // Statement/expression boundaries bind looser than anything.
+        "=" | "," | ";" | ":" => 0,
+        _ => return None,
+    })
+}
+
+/// Find the left operand span `[start, op_idx)` for the operator at `op_idx`.
+/// Scans left over tokens that are part of the operand, stopping before any
+/// binary operator whose precedence is `<= prec` (looser-or-equal binds the
+/// operand away) or a boundary. Returns `(start_idx, op_idx)`.
+fn operand_span_left(toks: &[Tok<'_>], op_idx: usize, prec: u8) -> Option<(usize, usize)> {
+    let mut start = op_idx;
+    let mut j = op_idx;
+    while j > 0 {
+        let t = &toks[j - 1];
+        match t.kind {
+            TokKind::Space => {
+                j -= 1;
+            }
+            TokKind::Word if is_boundary_keyword(&t.text) => break,
+            TokKind::Word | TokKind::Str | TokKind::Group => {
+                start = j - 1;
+                j -= 1;
+            }
+            TokKind::Op => {
+                // A boundary keyword/op: stop. Unary minus handling: if this op
+                // is immediately an operand-leading sign we still stop (the
+                // operand began after it).
+                match op_precedence(&t.text) {
+                    Some(p) if p > prec => {
+                        // Higher-precedence operator binds into our operand.
+                        start = j - 1;
+                        j -= 1;
+                    }
+                    _ => break,
+                }
+            }
+            TokKind::Comment => break,
+        }
+    }
+    if start == op_idx {
+        return None; // empty operand
+    }
+    Some((start, op_idx))
+}
+
+/// Find the right operand span `(op_idx, end)` for the operator at `op_idx`.
+fn operand_span_right(toks: &[Tok<'_>], op_idx: usize, prec: u8) -> Option<(usize, usize)> {
+    let mut end = op_idx + 1;
+    let mut j = op_idx + 1;
+    let n = toks.len();
+    // Allow a leading unary +/-/not/# on the right operand.
+    while j < n {
+        let t = &toks[j];
+        match t.kind {
+            TokKind::Space => {
+                j += 1;
+                end = j;
+            }
+            TokKind::Word if is_boundary_keyword(&t.text) => break,
+            TokKind::Word | TokKind::Str | TokKind::Group => {
+                j += 1;
+                end = j;
+            }
+            TokKind::Op => match op_precedence(&t.text) {
+                Some(p) if p > prec => {
+                    j += 1;
+                    end = j;
+                }
+                _ => {
+                    // Unary sign directly after the operator is part of operand.
+                    if (t.text == "-" || t.text == "#" || t.text == "~")
+                        && j == op_idx + 1 + leading_space(toks, op_idx + 1)
+                    {
+                        j += 1;
+                        end = j;
+                    } else {
+                        break;
+                    }
+                }
+            },
+            TokKind::Comment => break,
+        }
+    }
+    if end == op_idx + 1 {
+        return None;
+    }
+    Some((op_idx + 1, end))
+}
+
+/// Lua keywords that act as operand boundaries when they appear as a `Word`
+/// token (they terminate or separate expressions). `and`/`or`/`not` are NOT
+/// here — `and`/`or` are handled via precedence, and `not`/`nil`/`true`/`false`
+/// are valid operand atoms.
+fn is_boundary_keyword(text: &str) -> bool {
+    matches!(
+        text,
+        "return"
+            | "then"
+            | "do"
+            | "end"
+            | "else"
+            | "elseif"
+            | "if"
+            | "while"
+            | "for"
+            | "repeat"
+            | "until"
+            | "function"
+            | "local"
+            | "break"
+            | "in"
+            | "goto"
+    )
+}
+
+/// Count leading Space tokens starting at `from`.
+fn leading_space(toks: &[Tok<'_>], from: usize) -> usize {
+    let mut k = 0;
+    while from + k < toks.len() && toks[from + k].kind == TokKind::Space {
+        k += 1;
+    }
+    k
+}
+
+/// Run one per-line pass over `cur`, keeping the original borrow alive when
+/// the pass has nothing to change (so unchanged lines never allocate).
+fn apply<'a>(cur: Cow<'a, str>, pass: fn(&str) -> Cow<'_, str>) -> Cow<'a, str> {
+    match cur {
+        Cow::Borrowed(s) => pass(s),
+        Cow::Owned(s) => {
+            let changed = match pass(&s) {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(o) => Some(o),
+            };
+            Cow::Owned(changed.unwrap_or(s))
+        }
+    }
+}
+
+/// Process a single line with all PICO-8 transforms (no multi-line string
+/// state). Returns the line borrowed when nothing needed rewriting.
+fn process_line_normal(line: &str) -> Cow<'_, str> {
+    const PASSES: &[fn(&str) -> Cow<'_, str>] = &[
+        // Button glyph globals (`btn(⬅️)`) -> numeric literals, since Lua 5.4
+        // cannot lex the glyphs. First, so later token-level passes see atoms.
+        convert_button_glyphs,
+        // PICO-8 custom string escapes (`\*`,`\#`,`\-`,`\|`,`\+`,`\^`) -> hex
+        // escapes Lua 5.4 accepts. Done first; it only rewrites string interiors.
+        convert_string_escapes,
+        // PICO-8's Lua treats `//` as a single-line comment (z8lua llex.c: "'/' or
+        // '/=' or '//' (short comment)"). Standard Lua 5.4 parses `//` as integer
+        // division, so convert a `//` comment to `--` before any other transform.
+        // String-literal-aware; stops at an existing `--` comment.
+        convert_double_slash_comment,
+        // PICO-8 uses `\` as the integer-division operator (z8lua lparser.c: `'\\'
+        // -> OPR_IDIV`); standard Lua 5.4 uses `//`. Convert bare `\` (not `\=`,
+        // which the compound-assign pass handles) to `//`. Runs AFTER the comment
+        // conversion so the produced `//` is division, not a comment.
+        convert_backslash_idiv,
+        // PICO-8 unary peek operators `@`/`%`/`$` -> peek/peek2/peek4 calls. Done
+        // before the infix bitop pass so a peek inside a bitop operand (e.g.
+        // `@a >>> @b`) is already a function-call atom.
+        convert_unary_peek,
+        // PICO-8-only infix bitwise ops (`>>>`, `<<>`, `>><`, `^^`) -> API calls.
+        // Native Lua ops (`<<`, `>>`, `&`, `|`) pass through. Precedence-aware;
+        // bails to unchanged if operands can't be confidently delimited.
+        convert_infix_bitops,
+        // PICO-8 accepts binary number literals (`0b1010`, with optional fraction);
+        // Lua 5.4's lexer rejects them. Convert to decimal. (Hex literals already
+        // work natively in Lua.)
+        convert_binary_literals,
+        // `?expr`, shorthand `if`, compound assignment and `!=`.
+        process_line_tail,
+    ];
+    let mut cur = Cow::Borrowed(line);
+    for pass in PASSES {
+        cur = apply(cur, *pass);
+    }
+    cur
+}
+
+/// The statement-level transforms (`?expr`, shorthand `if`, compound
+/// assignment / `!=`) applied after the token-level passes.
+fn process_line_tail(line: &str) -> Cow<'_, str> {
     let trimmed = line.trim();
 
     // ?expr  ->  print(expr)
     if let Some(stripped) = trimmed.strip_prefix('?') {
         let indent = &line[..line.len() - line.trim_start().len()];
         let expr = stripped.trim();
-        let mut out = String::new();
+        let mut out = String::with_capacity(indent.len() + expr.len() + 7);
         out.push_str(indent);
         out.push_str("print(");
         out.push_str(expr);
         out.push(')');
-        return out;
+        return Cow::Owned(out);
     }
 
     // Single-line if shorthand: `if (cond) stmt` where there's no `then`
     if let Some(processed) = try_shorthand_if(trimmed, line) {
         // Also run operator transforms on the result (e.g., body may have +=)
-        return process_operators(&processed);
+        return apply(Cow::Owned(processed), process_operators);
     }
 
     // Compound assignment and != replacement
@@ -356,61 +1285,27 @@ fn process_line_normal(line: &str) -> String {
 /// no opening delimiter is found outside of regular strings.
 fn find_multiline_open(line: &str) -> Option<(usize, usize)> {
     let bytes = line.as_bytes();
-    let len = bytes.len();
-    let mut in_string: Option<u8> = None;
-    let mut i = 0;
-
-    while i < len {
-        let b = bytes[i];
-
-        // Track regular string state
-        if let Some(delim) = in_string {
-            if b == b'\\' && i + 1 < len {
-                // Escaped character inside string, skip next
-                i += 2;
-                continue;
+    for span in Spans::new(line) {
+        match span.kind {
+            SpanKind::Str | SpanKind::UnterminatedStr => {}
+            SpanKind::Comment => {
+                // `--[=*[` is a multi-line comment; the offset is the start of
+                // `--` so the dashes are part of the pass-through portion.
+                // Otherwise the rest of the line is a plain comment.
+                return try_parse_long_bracket_open(bytes, span.start + 2)
+                    .map(|eq_count| (span.start, eq_count));
             }
-            if b == delim {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Start of a regular string
-        if b == b'"' || b == b'\'' {
-            in_string = Some(b);
-            i += 1;
-            continue;
-        }
-
-        // Check for comment `--` possibly followed by `[=*[`
-        if b == b'-' && i + 1 < len && bytes[i + 1] == b'-' {
-            let comment_start = i;
-            let after_dashes = i + 2;
-            // Check if this is a multi-line comment: --[=*[
-            if after_dashes < len && bytes[after_dashes] == b'[' {
-                if let Some(eq_count) = try_parse_long_bracket_open(bytes, after_dashes) {
-                    // Multi-line comment opening found.
-                    // The byte offset is the start of `--` so that the `--` prefix is
-                    // included in the "pass-through" portion.
-                    return Some((comment_start, eq_count));
+            SpanKind::Code => {
+                for i in span.start..span.end {
+                    if bytes[i] == b'[' {
+                        if let Some(eq_count) = try_parse_long_bracket_open(bytes, i) {
+                            return Some((i, eq_count));
+                        }
+                    }
                 }
             }
-            // Regular single-line comment -- rest of line is a comment, no multi-line open.
-            return None;
         }
-
-        // Check for long bracket string `[=*[`
-        if b == b'[' {
-            if let Some(eq_count) = try_parse_long_bracket_open(bytes, i) {
-                return Some((i, eq_count));
-            }
-        }
-
-        i += 1;
     }
-
     None
 }
 
@@ -468,30 +1363,39 @@ fn find_multiline_close(s: &str, eq_count: usize) -> Option<usize> {
 /// A backslash at the end of a line (ignoring trailing whitespace) causes
 /// the current line and the next line to be joined with a space.
 /// The backslash must not be inside a string literal or comment.
-fn join_backslash_lines(code: &str) -> String {
-    let lines: Vec<&str> = code.lines().collect();
+/// Returns the source borrowed when no line has a continuation.
+fn join_backslash_lines(code: &str) -> Cow<'_, str> {
+    if !code.lines().any(line_ends_with_continuation) {
+        return Cow::Borrowed(code);
+    }
     let mut result = String::with_capacity(code.len());
-    let mut i = 0;
-    while i < lines.len() {
-        let mut combined = String::from(lines[i]);
-        while i < lines.len() && line_ends_with_continuation(&combined) {
+    let mut lines = code.lines();
+    while let Some(line) = lines.next() {
+        if !line_ends_with_continuation(line) {
+            result.push_str(line);
+            result.push('\n');
+            continue;
+        }
+        let mut combined = String::from(line);
+        while line_ends_with_continuation(&combined) {
             // Remove the trailing backslash and any whitespace before it
             let trimmed_end = combined.trim_end();
             let new_len = trimmed_end.len() - 1; // remove the '\'
             combined.truncate(new_len);
             let trimmed_len = combined.trim_end().len();
             combined.truncate(trimmed_len);
-            i += 1;
-            if i < lines.len() {
-                combined.push(' ');
-                combined.push_str(lines[i].trim_start());
+            match lines.next() {
+                Some(next) => {
+                    combined.push(' ');
+                    combined.push_str(next.trim_start());
+                }
+                None => break,
             }
         }
         result.push_str(&combined);
         result.push('\n');
-        i += 1;
     }
-    result
+    Cow::Owned(result)
 }
 
 /// Check if a line ends with a `\` continuation character outside of strings and comments.
@@ -500,48 +1404,11 @@ fn line_ends_with_continuation(line: &str) -> bool {
     if !trimmed.ends_with('\\') {
         return false;
     }
-
-    // Walk the line tracking string/comment state to see if the final `\` is outside strings/comments
-    let chars: Vec<char> = trimmed.chars().collect();
-    let mut in_string: Option<char> = None;
-    let mut last_outside_backslash = false;
-
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-
-        if let Some(delim) = in_string {
-            if ch == '\\' && i + 1 < chars.len() {
-                // Escaped character inside string, skip next
-                i += 2;
-                continue;
-            }
-            if ch == delim {
-                in_string = None;
-            }
-            last_outside_backslash = false;
-            i += 1;
-            continue;
-        }
-
-        // Check for comment start
-        if ch == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            // Rest of line is a comment; backslash in a comment is not continuation
-            return false;
-        }
-
-        if ch == '"' || ch == '\'' {
-            in_string = Some(ch);
-            last_outside_backslash = false;
-            i += 1;
-            continue;
-        }
-
-        last_outside_backslash = ch == '\\' && i == chars.len() - 1;
-        i += 1;
-    }
-
-    last_outside_backslash
+    // The final `\` counts only if it sits at code level: an unterminated
+    // string or a comment running to the end of the line swallows it.
+    Spans::new(trimmed)
+        .last()
+        .is_some_and(|s| s.kind == SpanKind::Code)
 }
 
 /// Try to convert a PICO-8 single-line `if (cond) stmt` shorthand.
@@ -556,16 +1423,26 @@ fn try_shorthand_if(trimmed: &str, original: &str) -> Option<String> {
         return None;
     }
     // Already has "then" keyword -> it's normal Lua, don't transform
-    if contains_keyword_outside_strings(trimmed, "then") {
+    if find_keyword_outside_strings(trimmed, "then").is_some() {
         return None;
     }
-    // Find matching close paren (string-aware)
+    // Find matching close paren (string-aware); byte offset.
     let close_idx = find_matching_paren(after_if, 0)?;
     let cond = &after_if[1..close_idx];
-    let rest = after_if[close_idx + 1..].trim();
-    if rest.is_empty() {
+    let rest_full = after_if[close_idx + 1..].trim();
+    if rest_full.is_empty() {
         return None;
     }
+
+    // A trailing line comment (e.g. `if(x)return--bye`) must be moved AFTER
+    // the synthesized `end`, otherwise the comment swallows the `end`.
+    let (rest, comment) = split_trailing_comment(rest_full);
+    let rest = rest.trim();
+    let comment_suffix = if comment.is_empty() {
+        String::new()
+    } else {
+        format!(" {comment}")
+    };
 
     let indent = &original[..original.len() - original.trim_start().len()];
 
@@ -575,134 +1452,119 @@ fn try_shorthand_if(trimmed: &str, original: &str) -> Option<String> {
         let after_else = rest[else_pos + 4..].trim();
         if !stmt1.is_empty() && !after_else.is_empty() {
             return Some(format!(
-                "{indent}if {cond} then {stmt1} else {after_else} end"
+                "{indent}if {cond} then {stmt1} else {after_else} end{comment_suffix}"
             ));
         }
     }
 
-    Some(format!("{indent}if {cond} then {rest} end"))
+    Some(format!("{indent}if {cond} then {rest} end{comment_suffix}"))
+}
+
+/// Split a trailing `--` line comment off `s`, ignoring `--` inside strings.
+/// Returns `(code_part, comment_part)` where `comment_part` is empty if there
+/// is no trailing comment. Long-bracket comments (`--[[`) are left in the code
+/// part (they are block comments, not line comments, and are rare on one line)
+/// and scanning continues after them.
+fn split_trailing_comment(s: &str) -> (&str, &str) {
+    let mut pos = 0;
+    while let Some(span) = Spans::from(s, pos).find(|sp| sp.kind == SpanKind::Comment) {
+        if try_parse_long_bracket_open(s.as_bytes(), span.start + 2).is_none() {
+            return (&s[..span.start], &s[span.start..]);
+        }
+        pos = span.start + 2;
+    }
+    (s, "")
 }
 
 /// Find the matching close parenthesis starting from `start` in `s`.
-/// `s[start]` must be `(`. Returns the index of the matching `)`.
-/// String-literal-aware.
+/// `s[start]` must be `(` at code level. Returns the BYTE offset of the
+/// matching `)`. String-literal-aware.
 fn find_matching_paren(s: &str, start: usize) -> Option<usize> {
-    let chars: Vec<char> = s.chars().collect();
-    let mut depth = 0;
-    let mut in_string: Option<char> = None;
-    let mut i = start;
-    while i < chars.len() {
-        let ch = chars[i];
-        if let Some(delim) = in_string {
-            if ch == '\\' && i + 1 < chars.len() {
-                i += 2;
-                continue;
-            }
-            if ch == delim {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-        if ch == '"' || ch == '\'' {
-            in_string = Some(ch);
-            i += 1;
-            continue;
-        }
-        if ch == '(' {
-            depth += 1;
-        } else if ch == ')' {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    for span in Spans::from(s, start).code() {
+        for (off, &b) in bytes[span.start..span.end].iter().enumerate() {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(span.start + off);
+                    }
+                }
+                _ => {}
             }
         }
-        i += 1;
     }
     None
 }
 
-/// Check if `line` contains the keyword `kw` outside of string literals.
-/// A keyword must be bounded by non-alphanumeric/non-underscore characters.
-fn contains_keyword_outside_strings(line: &str, kw: &str) -> bool {
-    find_keyword_outside_strings(line, kw).is_some()
-}
-
-/// Find the byte position of keyword `kw` outside of string literals.
-/// A keyword must be bounded by non-identifier characters (or line start/end).
+/// Find the byte position of keyword `kw` outside of string literals and
+/// comments. A keyword must be bounded by non-identifier bytes (or line
+/// start/end).
 fn find_keyword_outside_strings(line: &str, kw: &str) -> Option<usize> {
-    let chars: Vec<char> = line.chars().collect();
-    let kw_chars: Vec<char> = kw.chars().collect();
-    let mut in_string: Option<char> = None;
-    let mut i = 0;
-    // We also track byte offsets for returning positions
-    let mut byte_offset = 0;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        if let Some(delim) = in_string {
-            if ch == '\\' && i + 1 < chars.len() {
-                byte_offset += ch.len_utf8() + chars[i + 1].len_utf8();
-                i += 2;
-                continue;
-            }
-            if ch == delim {
-                in_string = None;
-            }
-            byte_offset += ch.len_utf8();
-            i += 1;
-            continue;
+    let bytes = line.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    for span in Spans::new(line) {
+        match span.kind {
+            SpanKind::Comment => return None, // rest is comment
+            SpanKind::Str | SpanKind::UnterminatedStr => continue,
+            SpanKind::Code => {}
         }
-        if ch == '"' || ch == '\'' {
-            in_string = Some(ch);
-            byte_offset += ch.len_utf8();
-            i += 1;
-            continue;
-        }
-        // Check for comment
-        if ch == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            return None; // rest is comment
-        }
-        // Check for keyword match
-        if i + kw_chars.len() <= chars.len() && chars[i..i + kw_chars.len()] == kw_chars[..] {
-            // Check left boundary
-            let left_ok = if i == 0 {
-                true
-            } else {
-                let prev = chars[i - 1];
-                !prev.is_ascii_alphanumeric() && prev != '_'
-            };
-            // Check right boundary
-            let right_ok = if i + kw_chars.len() >= chars.len() {
-                true
-            } else {
-                let next = chars[i + kw_chars.len()];
-                !next.is_ascii_alphanumeric() && next != '_'
-            };
+        let mut from = span.start;
+        while let Some(rel) = line[from..span.end].find(kw) {
+            let at = from + rel;
+            let end = at + kw.len();
+            let left_ok = at == 0 || !is_ident(bytes[at - 1]);
+            let right_ok = end >= bytes.len() || !is_ident(bytes[end]);
             if left_ok && right_ok {
-                return Some(byte_offset);
+                return Some(at);
             }
+            from = at + 1;
         }
-        byte_offset += ch.len_utf8();
-        i += 1;
     }
     None
 }
 
 /// Replace compound assignments (+=, -=, *=, /=, %=, ..=) and != with standard Lua.
-fn process_operators(line: &str) -> String {
+fn process_operators(line: &str) -> Cow<'_, str> {
     // Fast path: if the line has no `=` or `!`, no operators can match.
     if !line.contains('=') && !line.contains('!') {
-        return line.to_string();
+        return Cow::Borrowed(line);
     }
 
-    let mut result = line.to_string();
+    let mut result = Cow::Borrowed(line);
 
-    // Replace != with ~= (but not inside strings)
-    result = replace_outside_strings(&result, "!=", "~=");
+    // Function-form compound assignments first, longest operator first so that
+    // e.g. `>>>=` matches before `>>=`, `<<>=` before `<<=`, `^^=` before `^=`.
+    // PICO-8's bitwise/shift ops map to function calls, not Lua operators:
+    //   var <<= e   ->  var = shl(var, (e))   (z8lua TK_SHLE etc.)
+    for (op, func) in &[
+        (">><=", "rotr"), // TK_ROTRE
+        (">>>=", "lshr"), // TK_LSHRE
+        ("<<>=", "rotl"), // TK_ROTLE
+        ("<<=", "shl"),   // TK_SHLE
+        (">>=", "shr"),   // TK_SHRE
+        ("^^=", "bxor"),  // TK_BXORE
+        ("&=", "band"),   // TK_BANDE
+        ("|=", "bor"),    // TK_BORE
+    ] {
+        if let Some(transformed) = compound_assign(&result, op, |var, expr| {
+            format!("{var} = {func}({var}, ({expr}))")
+        }) {
+            result = Cow::Owned(transformed);
+        }
+    }
 
-    // Compound assignments: var op= expr  ->  var = var op (expr)
-    // Important: ..= must come before the others to avoid partial matches
+    // Replace != with ~= (but not inside strings). Done after the shift ops so
+    // it can't interfere with `>>=`/`<<=` matching.
+    if let Cow::Owned(replaced) = replace_outside_strings(&result, "!=", "~=") {
+        result = Cow::Owned(replaced);
+    }
+
+    // Infix-operator compound assignments: var op= expr  ->  var = var op (expr)
+    // Important: ..= must come before the others to avoid partial matches; `^=`
+    // is pow (Lua has `^`), distinct from the `^^=` (bxor) handled above.
     for (op, lua_op) in &[
         ("..=", ".."),
         ("+=", "+"),
@@ -710,126 +1572,93 @@ fn process_operators(line: &str) -> String {
         ("*=", "*"),
         ("/=", "/"),
         ("%=", "%"),
+        ("^=", "^"),
+        // PICO-8 `\=` is integer-division-assign -> Lua `//`.
+        ("\\=", "//"),
     ] {
-        if let Some(transformed) = try_compound_assign(&result, op, lua_op) {
-            result = transformed;
+        if let Some(transformed) = compound_assign(&result, op, |var, expr| {
+            format!("{var} = {var} {lua_op} ({expr})")
+        }) {
+            result = Cow::Owned(transformed);
         }
     }
 
     result
 }
 
-/// Replace occurrences of `pattern` with `replacement`, but only outside of string literals
-/// and comments.
-fn replace_outside_strings(line: &str, pattern: &str, replacement: &str) -> String {
-    let mut result = String::with_capacity(line.len());
-    let mut in_string: Option<char> = None;
-    let chars: Vec<char> = line.chars().collect();
-    let pat_chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if let Some(delim) = in_string {
-            result.push(chars[i]);
-            if chars[i] == '\\' && i + 1 < chars.len() {
-                // Escaped character inside string - push next char and skip
-                i += 1;
-                result.push(chars[i]);
-                i += 1;
-                continue;
-            }
-            if chars[i] == delim {
-                in_string = None;
-            }
-            i += 1;
-        } else if chars[i] == '"' || chars[i] == '\'' {
-            in_string = Some(chars[i]);
-            result.push(chars[i]);
-            i += 1;
-        } else if chars[i] == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            // Rest of line is a comment
-            for ch in chars.iter().skip(i) {
-                result.push(*ch);
-            }
-            return result;
-        } else if i + pat_chars.len() <= chars.len()
-            && chars[i..i + pat_chars.len()] == pat_chars[..]
-        {
-            result.push_str(replacement);
-            i += pat_chars.len();
-        } else {
-            result.push(chars[i]);
-            i += 1;
+/// Replace occurrences of `pattern` with `replacement`, but only outside of
+/// string literals and comments. `pattern` must not contain a quote or `--`.
+/// Returns the line borrowed when there is nothing to replace.
+fn replace_outside_strings<'a>(line: &'a str, pattern: &str, replacement: &str) -> Cow<'a, str> {
+    let mut out: Option<String> = None;
+    let mut copied = 0usize;
+    for span in Spans::new(line).code() {
+        let mut from = span.start;
+        while let Some(rel) = line[from..span.end].find(pattern) {
+            let at = from + rel;
+            let out = out.get_or_insert_with(|| String::with_capacity(line.len()));
+            out.push_str(&line[copied..at]);
+            out.push_str(replacement);
+            copied = at + pattern.len();
+            from = copied;
         }
     }
-    result
+    match out {
+        Some(mut out) => {
+            out.push_str(&line[copied..]);
+            Cow::Owned(out)
+        }
+        None => Cow::Borrowed(line),
+    }
 }
 
-/// Replace ALL compound assignments on a line.
-fn try_compound_assign(line: &str, op: &str, lua_op: &str) -> Option<String> {
+/// Rewrite every `var <op> expr` compound assignment on the line, where `op`
+/// is a compound operator (e.g. `+=`, `>>>=`) and `emit(var, expr)` produces
+/// the replacement statement. String- and comment-aware. Returns `None` if
+/// nothing was rewritten.
+fn compound_assign(line: &str, op: &str, emit: impl Fn(&str, &str) -> String) -> Option<String> {
     if !line.contains(op) {
         return None;
     }
 
-    let chars: Vec<char> = line.chars().collect();
-    let op_chars: Vec<char> = op.chars().collect();
-    let mut in_string: Option<char> = None;
-    let mut result = String::new();
-    let mut i = 0;
+    let mut result = String::with_capacity(line.len() + 16);
+    // `result` mirrors `line[..copied]` (with rewrites applied).
+    let mut copied = 0usize;
     let mut changed = false;
+    let mut spans = Spans::new(line);
 
-    while i < chars.len() {
-        // Track string state
-        if let Some(delim) = in_string {
-            result.push(chars[i]);
-            if chars[i] == '\\' && i + 1 < chars.len() {
-                // Escaped character in string
-                i += 1;
-                result.push(chars[i]);
-                i += 1;
-                continue;
-            }
-            if chars[i] == delim {
-                in_string = None;
-            }
-            i += 1;
+    while let Some(span) = spans.next() {
+        if span.kind != SpanKind::Code {
             continue;
         }
-        if chars[i] == '"' || chars[i] == '\'' {
-            in_string = Some(chars[i]);
-            result.push(chars[i]);
-            i += 1;
-            continue;
-        }
-        if chars[i] == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            // Rest is a comment, emit as-is
-            while i < chars.len() {
-                result.push(chars[i]);
-                i += 1;
-            }
-            break;
-        }
-
-        // Check for compound operator match
-        if i + op_chars.len() <= chars.len() && chars[i..i + op_chars.len()] == op_chars[..] {
+        let mut from = span.start;
+        while let Some(rel) = line[from..span.end].find(op) {
+            let at = from + rel;
+            result.push_str(&line[copied..at]);
+            copied = at;
             if let Some((var, prefix_end)) = extract_lvalue_backwards(&result) {
-                let expr_start = i + op_chars.len();
-                let (expr, expr_end) = extract_rhs_expr(&chars, expr_start);
-
+                let expr_start = at + op.len();
+                let (expr, expr_end) = extract_rhs_expr(line, expr_start);
                 if !var.is_empty() && !expr.is_empty() {
+                    let stmt = emit(var, &expr);
                     result.truncate(prefix_end);
-                    result.push_str(&format!("{var} = {var} {lua_op} ({expr})"));
-                    i = expr_end;
+                    result.push_str(&stmt);
+                    copied = expr_end;
                     changed = true;
-                    continue;
+                    // The RHS may have crossed string spans; resume the span
+                    // scan at its (code-level) end.
+                    spans = Spans::from(line, expr_end);
+                    break;
                 }
             }
+            // No rewrite here: keep scanning one byte further on so an
+            // overlapping match (e.g. `..=` inside `...=`) is still found.
+            from = at + 1;
         }
-
-        result.push(chars[i]);
-        i += 1;
     }
 
     if changed {
+        result.push_str(&line[copied..]);
         Some(result)
     } else {
         None
@@ -837,28 +1666,29 @@ fn try_compound_assign(line: &str, op: &str, lua_op: &str) -> Option<String> {
 }
 
 /// Look backwards from the end of `built` to extract an l-value (variable name).
-/// Returns (lvalue_string, index_in_built_where_lvalue_starts).
-fn extract_lvalue_backwards(built: &str) -> Option<(String, usize)> {
-    let chars: Vec<char> = built.chars().collect();
-    let mut end = chars.len();
+/// Returns `(lvalue, byte_offset_in_built_where_lvalue_starts)`.
+fn extract_lvalue_backwards(built: &str) -> Option<(&str, usize)> {
+    let bytes = built.as_bytes();
+    let mut end = bytes.len();
 
     // Skip trailing whitespace
-    while end > 0 && (chars[end - 1] == ' ' || chars[end - 1] == '\t') {
+    while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
         end -= 1;
     }
     if end == 0 {
         return None;
     }
 
-    // Scan backwards through the l-value
+    // Scan backwards through the l-value. Only ASCII bytes are consumed
+    // outside brackets, so `start` always lands on a char boundary.
     let mut start = end;
     let mut bracket_depth = 0i32;
     while start > 0 {
-        let ch = chars[start - 1];
-        if ch == ']' {
+        let ch = bytes[start - 1];
+        if ch == b']' {
             bracket_depth += 1;
             start -= 1;
-        } else if ch == '[' {
+        } else if ch == b'[' {
             if bracket_depth > 0 {
                 bracket_depth -= 1;
                 start -= 1;
@@ -867,9 +1697,9 @@ fn extract_lvalue_backwards(built: &str) -> Option<(String, usize)> {
             }
         } else if bracket_depth > 0
             || ch.is_ascii_alphanumeric()
-            || ch == '_'
-            || ch == '.'
-            || ch == ':'
+            || ch == b'_'
+            || ch == b'.'
+            || ch == b':'
         {
             start -= 1;
         } else {
@@ -881,41 +1711,50 @@ fn extract_lvalue_backwards(built: &str) -> Option<(String, usize)> {
         return None;
     }
 
-    let var: String = chars[start..end].iter().collect();
-
-    let first = var.chars().next()?;
-    if !first.is_ascii_alphabetic() && first != '_' {
+    let first = bytes[start];
+    if !first.is_ascii_alphabetic() && first != b'_' {
         return None;
     }
 
-    Some((var, start))
+    Some((&built[start..end], start))
 }
 
-/// Check if position `i` in `chars` is at a keyword boundary that ends a
+/// Check if position `i` in `bytes` is at a keyword boundary that ends a
 /// statement: `end`, `else`, or `elseif`, preceded by whitespace (or at the start).
-fn starts_with_keyword_boundary(chars: &[char], i: usize) -> bool {
-    let remaining = &chars[i..];
-    let preceded_by_ws = i == 0 || chars[i - 1] == ' ' || chars[i - 1] == '\t';
+fn starts_with_keyword_boundary(bytes: &[u8], i: usize) -> bool {
+    let remaining = &bytes[i..];
+    let preceded_by_ws = i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t';
 
-    // Check for " end", " else", " elseif", "\tend", "\telse", "\telseif"
-    for kw in &["end", "else", "elseif"] {
-        let kw_chars: &[char] = match *kw {
-            "end" => &['e', 'n', 'd'],
-            "else" => &['e', 'l', 's', 'e'],
-            "elseif" => &['e', 'l', 's', 'e', 'i', 'f'],
-            _ => continue,
-        };
+    // Keywords that terminate a preceding expression / start a new statement.
+    // NOTE: `and`/`or`/`not` are deliberately excluded — they are part of the
+    // expression. `then`/`do`/`until`/`return`/`break` follow an expression and
+    // begin new syntax, so the compound-assignment RHS must stop before them.
+    const BOUNDARY_KWS: &[&[u8]] = &[
+        b"end", b"elseif", // before "else" so longer matches win
+        b"else", b"then", b"do", b"return", b"until", b"break",
+    ];
 
-        // Match with leading whitespace
-        if remaining.len() > kw_chars.len()
-            && (remaining[0] == ' ' || remaining[0] == '\t')
-            && remaining[1..].starts_with(kw_chars)
+    // The keyword must be a whole word: followed by a non-identifier byte
+    // (or end-of-line) so we don't match `endx` or `returns`.
+    let word_boundary_after = |after: usize| -> bool {
+        after >= remaining.len() || {
+            let c = remaining[after];
+            !(c.is_ascii_alphanumeric() || c == b'_')
+        }
+    };
+
+    for kw in BOUNDARY_KWS {
+        // Match with one leading whitespace char.
+        if remaining.len() > kw.len()
+            && (remaining[0] == b' ' || remaining[0] == b'\t')
+            && remaining[1..].starts_with(kw)
+            && word_boundary_after(1 + kw.len())
         {
             return true;
         }
 
-        // Match at position if preceded by whitespace
-        if preceded_by_ws && remaining.starts_with(kw_chars) {
+        // Match at position if preceded by whitespace.
+        if preceded_by_ws && remaining.starts_with(kw) && word_boundary_after(kw.len()) {
             return true;
         }
     }
@@ -924,66 +1763,356 @@ fn starts_with_keyword_boundary(chars: &[char], i: usize) -> bool {
 }
 
 /// Extract the right-hand-side expression after a compound operator.
-/// Stops at: `end`, `else`, `elseif`, `)`, end of line, or comment.
-/// Returns (expression_string, index_past_expression).
-fn extract_rhs_expr(chars: &[char], start: usize) -> (String, usize) {
+/// Stops at: `end`, `else`, `elseif`, `)`, `;`, end of line, or comment.
+/// `start` must be a code-level byte offset. Returns
+/// `(expression_string, byte_index_past_expression)`; the index is always a
+/// code-level position (or the line length).
+fn extract_rhs_expr(line: &str, start: usize) -> (String, usize) {
+    let bytes = line.as_bytes();
     let mut i = start;
     // Skip leading whitespace
-    while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
         i += 1;
     }
 
     let expr_start = i;
     let mut paren_depth = 0i32;
-    let mut in_string: Option<char> = None;
 
-    while i < chars.len() {
-        if let Some(delim) = in_string {
-            if chars[i] == '\\' && i + 1 < chars.len() {
-                // Escaped character in string
-                i += 2;
-                continue;
-            }
-            if chars[i] == delim {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-        if chars[i] == '"' || chars[i] == '\'' {
-            in_string = Some(chars[i]);
-            i += 1;
-            continue;
-        }
-        if chars[i] == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            break; // comment
-        }
-        if chars[i] == '(' {
-            paren_depth += 1;
-        } else if chars[i] == ')' {
-            if paren_depth > 0 {
-                paren_depth -= 1;
-            } else {
+    'outer: for span in Spans::from(line, i) {
+        match span.kind {
+            SpanKind::Comment => {
+                i = span.start;
                 break;
             }
+            SpanKind::Str | SpanKind::UnterminatedStr => {
+                i = span.end;
+                continue;
+            }
+            SpanKind::Code => {}
         }
+        i = span.start;
+        while i < span.end {
+            let b = bytes[i];
+            // A statement separator ends the RHS expression (e.g. `t /= d;`).
+            if paren_depth == 0 && b == b';' {
+                break 'outer;
+            }
+            if b == b'(' {
+                paren_depth += 1;
+            } else if b == b')' {
+                if paren_depth > 0 {
+                    paren_depth -= 1;
+                } else {
+                    break 'outer;
+                }
+            }
 
-        // Check for Lua keywords that end a statement (only at paren_depth 0)
-        if paren_depth == 0 && starts_with_keyword_boundary(chars, i) {
-            let expr: String = chars[expr_start..i].iter().collect();
-            return (expr.trim().to_string(), i);
+            // Check for Lua keywords that end a statement (only at paren_depth 0)
+            if paren_depth == 0 && starts_with_keyword_boundary(bytes, i) {
+                break 'outer;
+            }
+
+            i += 1;
         }
-
-        i += 1;
     }
 
-    let expr: String = chars[expr_start..i].iter().collect();
-    (expr.trim().to_string(), i)
+    (line[expr_start..i].trim().to_string(), i)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------
+    // `//` single-line comments (PICO-8 treats `//` as a comment, NOT integer
+    // division — z8lua llex.c). Real BBS carts use `pal(1,0) //0`.
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_double_slash_trailing_comment() {
+        let out = preprocess_pico8("pal(1,0) //0\n");
+        assert_eq!(out.trim(), "pal(1,0) --0");
+    }
+
+    #[test]
+    fn test_double_slash_full_line_comment() {
+        let out = preprocess_pico8("//a comment\n");
+        assert_eq!(out.trim(), "--a comment");
+    }
+
+    #[test]
+    fn test_double_slash_inside_string_untouched() {
+        // `//` inside a string literal must NOT become a comment.
+        let out = preprocess_pico8("x=\"http://a\"\n");
+        assert_eq!(out.trim(), "x=\"http://a\"");
+    }
+
+    #[test]
+    fn test_double_slash_after_dash_comment_untouched() {
+        // An existing `--` comment owns the rest of the line; `//` within it
+        // stays literal comment text.
+        let out = preprocess_pico8("x=1 -- see // note\n");
+        assert_eq!(out.trim(), "x=1 -- see // note");
+    }
+
+    #[test]
+    fn test_double_slash_does_not_break_compound_ops() {
+        // Code before the `//` still gets normal transforms applied. (The
+        // compound-op transform may drop the space before the comment; the
+        // result is still valid Lua with the comment intact.)
+        let out = preprocess_pico8("x+=1 //inc\n");
+        assert_eq!(out.trim(), "x = x + (1)--inc");
+    }
+
+    // -------------------------------------------------------
+    // `\` integer division (PICO-8) -> `//` (Lua 5.4). Integer division in
+    // PICO-8 is `\`, NOT `//` (which is a comment). z8lua lparser.c maps `\`
+    // to OPR_IDIV.
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_backslash_integer_division() {
+        assert_eq!(preprocess_pico8("x=7\\2\n").trim(), "x=7//2");
+        assert_eq!(preprocess_pico8("y = a \\ b\n").trim(), "y = a // b");
+    }
+
+    #[test]
+    fn test_backslash_compound_assign() {
+        assert_eq!(preprocess_pico8("x\\=3\n").trim(), "x = x // (3)");
+    }
+
+    #[test]
+    fn test_backslash_inside_string_untouched() {
+        // A backslash escape inside a string must NOT become `//`.
+        assert_eq!(preprocess_pico8("s=\"a\\nb\"\n").trim(), "s=\"a\\nb\"");
+    }
+
+    #[test]
+    fn test_backslash_line_continuation_still_joins() {
+        // A trailing `\` is line continuation (joined before idiv conversion),
+        // not integer division.
+        let out = preprocess_pico8("x=1+\\\n2\n");
+        assert!(
+            out.contains("x=1+2") || out.contains("x=1+ 2"),
+            "got: {out:?}"
+        );
+        assert!(
+            !out.contains("//"),
+            "continuation must not become idiv: {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_backslash_idiv_evaluates() {
+        let out = preprocess_pico8("function f() return 17\\5 end\n");
+        assert!(out.contains("17//5"), "got: {out}");
+    }
+
+    // -------------------------------------------------------
+    // PICO-8 custom string escapes (\* \# \- \| \+ \^) -> \xNN. Lua 5.4 rejects
+    // the raw forms; the P8SCII control bytes 1-6 must be preserved.
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_string_escapes_mapped() {
+        assert_eq!(preprocess_pico8("s=\"\\*\"\n").trim(), "s=\"\\x01\"");
+        assert_eq!(preprocess_pico8("s=\"\\#\"\n").trim(), "s=\"\\x02\"");
+        assert_eq!(preprocess_pico8("s=\"\\-\"\n").trim(), "s=\"\\x03\"");
+        assert_eq!(preprocess_pico8("s=\"\\|\"\n").trim(), "s=\"\\x04\"");
+        assert_eq!(preprocess_pico8("s=\"\\+\"\n").trim(), "s=\"\\x05\"");
+        assert_eq!(preprocess_pico8("s=\"\\^\"\n").trim(), "s=\"\\x06\"");
+    }
+
+    #[test]
+    fn test_string_escape_trailing_digit_not_merged() {
+        // `\*4` must be char 1 + '4' (two bytes), NOT a single `\14`.
+        // Hex escape `\x01` is exactly 2 digits and won't absorb the '4'.
+        assert_eq!(preprocess_pico8("s=\"\\*4\"\n").trim(), "s=\"\\x014\"");
+    }
+
+    #[test]
+    fn test_string_escape_other_escapes_untouched() {
+        // Standard escapes and an escaped backslash are preserved.
+        assert_eq!(preprocess_pico8("s=\"\\n\\t\"\n").trim(), "s=\"\\n\\t\"");
+        assert_eq!(preprocess_pico8("s=\"\\\\*\"\n").trim(), "s=\"\\\\*\"");
+        // A `*` outside a string is untouched (multiplication).
+        assert_eq!(preprocess_pico8("x=a*b\n").trim(), "x=a*b");
+    }
+
+    // -------------------------------------------------------
+    // Binary number literals (0b1010) -> decimal. PICO-8's lexer accepts them;
+    // Lua 5.4's does not. (Hex literals already work in Lua.)
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_binary_literals() {
+        assert_eq!(preprocess_pico8("x=0b1010\n").trim(), "x=10");
+        assert_eq!(preprocess_pico8("x=0B11\n").trim(), "x=3");
+        assert_eq!(preprocess_pico8("x=0b0\n").trim(), "x=0");
+        // fractional binary.
+        assert_eq!(preprocess_pico8("x=0b0101.1\n").trim(), "x=5.5");
+        // multiple on one line.
+        assert_eq!(preprocess_pico8("x=0b1+0b10\n").trim(), "x=1+2");
+    }
+
+    #[test]
+    fn test_binary_literals_boundaries() {
+        // Hex passes through (native Lua).
+        assert_eq!(preprocess_pico8("x=0xff\n").trim(), "x=0xff");
+        // Inside a string: untouched.
+        assert_eq!(preprocess_pico8("s=\"0b11\"\n").trim(), "s=\"0b11\"");
+        // Part of an identifier: not a literal.
+        assert_eq!(preprocess_pico8("x=a0b1\n").trim(), "x=a0b1");
+    }
+
+    // -------------------------------------------------------
+    // Unary peek operators: @ -> peek, % -> peek2 (prefix), $ -> peek4.
+    // Priority 12: binds a single atom + postfix, not a full expression.
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_unary_peek_basic() {
+        assert_eq!(preprocess_pico8("x=@0x5f00\n").trim(), "x=peek(0x5f00)");
+        assert_eq!(preprocess_pico8("x=$0x4300\n").trim(), "x=peek4(0x4300)");
+        assert_eq!(preprocess_pico8("x=%100\n").trim(), "x=peek2(100)");
+    }
+
+    #[test]
+    fn test_unary_peek_binding_and_nesting() {
+        // Unary (prio 12) binds tighter than `+` (prio 10).
+        assert_eq!(preprocess_pico8("x=@a+1\n").trim(), "x=peek(a)+1");
+        // Parenthesized operand.
+        assert_eq!(preprocess_pico8("x=@(a+1)\n").trim(), "x=peek((a+1))");
+        // Postfix indexing attaches to the operand.
+        assert_eq!(preprocess_pico8("x=@a[2]\n").trim(), "x=peek(a[2])");
+        // Nested peeks resolve inside-out.
+        assert_eq!(preprocess_pico8("x=@@a\n").trim(), "x=peek(peek(a))");
+    }
+
+    #[test]
+    fn test_percent_modulo_not_mistaken_for_peek2() {
+        // `%` after a value is binary modulo, NOT peek2.
+        assert_eq!(preprocess_pico8("x=5%2\n").trim(), "x=5%2");
+        assert_eq!(preprocess_pico8("x=a%b\n").trim(), "x=a%b");
+        assert_eq!(preprocess_pico8("x=(a)%2\n").trim(), "x=(a)%2");
+    }
+
+    #[test]
+    fn test_unary_peek_in_string_untouched() {
+        assert_eq!(
+            preprocess_pico8("s=\"@a $b %c\"\n").trim(),
+            "s=\"@a $b %c\""
+        );
+    }
+
+    // -------------------------------------------------------
+    // Infix PICO-8-only bitwise operators (>>> <<> >>< ^^) -> API calls.
+    // Native Lua ops (<< >> & |) pass through. Precedence-aware.
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_infix_bitops_basic() {
+        assert_eq!(preprocess_pico8("x=8>>>1\n").trim(), "x=lshr(8, 1)");
+        assert_eq!(preprocess_pico8("x=5^^3\n").trim(), "x=bxor(5, 3)");
+        assert_eq!(preprocess_pico8("x=8<<>4\n").trim(), "x=rotl(8, 4)");
+        assert_eq!(preprocess_pico8("x=8>><1\n").trim(), "x=rotr(8, 1)");
+    }
+
+    #[test]
+    fn test_infix_bitops_native_pass_through() {
+        // `<<`, `>>`, `&`, `|` are native Lua 5.4 — must NOT be transformed.
+        assert_eq!(preprocess_pico8("x=8>>1\n").trim(), "x=8>>1");
+        assert_eq!(preprocess_pico8("x=8<<1\n").trim(), "x=8<<1");
+        assert_eq!(preprocess_pico8("x=8&4\n").trim(), "x=8&4");
+        assert_eq!(preprocess_pico8("x=8|4\n").trim(), "x=8|4");
+    }
+
+    #[test]
+    fn test_infix_bitops_precedence() {
+        // `+` (prec 10) binds tighter than `>>>` (prec 7): operand is `a+b`.
+        assert_eq!(preprocess_pico8("x=a+b>>>c\n").trim(), "x=lshr(a+b, c)");
+        assert_eq!(preprocess_pico8("x=a>>>b+c\n").trim(), "x=lshr(a, b+c)");
+        // chained left-assoc.
+        assert_eq!(
+            preprocess_pico8("x=a^^b^^c\n").trim(),
+            "x=bxor(bxor(a, b), c)"
+        );
+    }
+
+    #[test]
+    fn test_infix_bitops_stop_at_keywords_and_strings() {
+        assert_eq!(
+            preprocess_pico8("return 8>>>1\n").trim(),
+            "return lshr(8, 1)"
+        );
+        // string contents untouched.
+        assert_eq!(preprocess_pico8("s=\"a>>>b\"\n").trim(), "s=\"a>>>b\"");
+        // function/return boundary respected.
+        assert_eq!(
+            preprocess_pico8("function f() return 8>>>1 end\n").trim(),
+            "function f() return lshr(8, 1 )end"
+        );
+    }
+
+    // -------------------------------------------------------
+    // Bitwise / shift compound assignments (PICO-8 -> function-call form).
+    // z8lua: <<= >>= >>>= <<>= >><= &= |= ^^= map to shl/shr/lshr/rotl/rotr/
+    // band/bor/bxor; ^= is pow.
+    // -------------------------------------------------------
+
+    #[test]
+    fn test_shift_compound_assigns() {
+        assert_eq!(preprocess_pico8("x<<=1\n").trim(), "x = shl(x, (1))");
+        assert_eq!(preprocess_pico8("x>>=1\n").trim(), "x = shr(x, (1))");
+        assert_eq!(preprocess_pico8("x>>>=1\n").trim(), "x = lshr(x, (1))");
+        assert_eq!(preprocess_pico8("x<<>=4\n").trim(), "x = rotl(x, (4))");
+        assert_eq!(preprocess_pico8("x>><=1\n").trim(), "x = rotr(x, (1))");
+    }
+
+    #[test]
+    fn test_bitwise_compound_assigns() {
+        assert_eq!(preprocess_pico8("x&=2\n").trim(), "x = band(x, (2))");
+        assert_eq!(preprocess_pico8("x|=2\n").trim(), "x = bor(x, (2))");
+        assert_eq!(preprocess_pico8("x^^=3\n").trim(), "x = bxor(x, (3))");
+    }
+
+    #[test]
+    fn test_pow_compound_assign_is_infix() {
+        // `^=` is exponent-assign (Lua has `^`), distinct from `^^=` (bxor).
+        assert_eq!(preprocess_pico8("x^=3\n").trim(), "x = x ^ (3)");
+    }
+
+    #[test]
+    fn test_compound_assign_rhs_stops_at_keywords() {
+        // RHS must not swallow a following statement keyword.
+        assert_eq!(
+            preprocess_pico8("x+=2 return x\n").trim(),
+            "x = x + (2) return x"
+        );
+        assert_eq!(
+            preprocess_pico8("x<<=2 return x\n").trim(),
+            "x = shl(x, (2)) return x"
+        );
+        // ...but `and`/`or` ARE part of the expression.
+        assert_eq!(preprocess_pico8("a+=b and c\n").trim(), "a = a + (b and c)");
+    }
+
+    #[test]
+    fn test_comparisons_not_mistaken_for_compound() {
+        // `<=`, `>=`, `==` must pass through untouched.
+        assert_eq!(
+            preprocess_pico8("if x<=2 then end\n").trim(),
+            "if x<=2 then end"
+        );
+        assert_eq!(
+            preprocess_pico8("if x>=2 then end\n").trim(),
+            "if x>=2 then end"
+        );
+        assert_eq!(
+            preprocess_pico8("if x==2 then end\n").trim(),
+            "if x==2 then end"
+        );
+    }
 
     // -------------------------------------------------------
     // Compound assignment operators
@@ -993,6 +2122,109 @@ mod tests {
     fn test_plus_equals() {
         let out = preprocess_pico8("x+=1\n");
         assert_eq!(out.trim(), "x = x + (1)");
+    }
+
+    #[test]
+    fn test_compound_assign_with_multibyte_utf8_no_panic() {
+        // Regression (loader fuzzer): a multibyte UTF-8 char before a compound
+        // operator made `extract_lvalue_backwards` return a char index that
+        // `String::truncate` rejected as a non-char-boundary, panicking. The
+        // l-value offset must be a byte offset. These must not panic and must
+        // still transform the trailing compound assignment.
+        let out = preprocess_pico8("-- héllo ⬅️\nx+=1\n");
+        assert!(out.contains("x = x + (1)"), "got: {out:?}");
+        // Multibyte content on the same line as the operator.
+        let out2 = preprocess_pico8(" €=0 x+=2\n");
+        assert!(out2.contains("x = x + (2)"), "got: {out2:?}");
+        // A multibyte identifier-ish prefix directly before the operator just
+        // must not panic (it isn't a valid l-value, so it's left alone).
+        let _ = preprocess_pico8("café+=1\n");
+    }
+
+    #[test]
+    fn test_shorthand_if_with_multibyte_utf8_no_panic() {
+        // Regression: `find_matching_paren` returned a CHAR index that
+        // `try_shorthand_if` used as a BYTE slice index, panicking on any
+        // multibyte char before the closing paren (PICO-8 button glyphs are
+        // common here). All index-returning scanners must yield byte offsets.
+        let out = preprocess_pico8("if (btn(\u{2b05}\u{fe0f})) x-=1\n");
+        assert_eq!(out.trim(), "if btn(0) then x = x - (1) end", "got: {out:?}");
+        let out = preprocess_pico8("if (s==\"\u{e9}\u{e9}\") x=1\n");
+        assert_eq!(
+            out.trim(),
+            "if s==\"\u{e9}\u{e9}\" then x=1 end",
+            "got: {out:?}"
+        );
+        // Multibyte in the body and in a trailing comment, with else.
+        let out = preprocess_pico8("if (a) b=\"\u{e9}\" else c=\"\u{2b05}\" -- \u{e9}\n");
+        assert_eq!(
+            out.trim(),
+            "if a then b=\"\u{e9}\" else c=\"\u{2b05}\" end -- \u{e9}",
+            "got: {out:?}"
+        );
+        // Multibyte before every other index-returning scanner: keyword
+        // search, `!=` replacement, peek/bitop tokenizer, binary literals.
+        let out = preprocess_pico8("if (s!=\"\u{e9}\") x=@a else y=0b11>>>b -- \u{e9}\n");
+        assert_eq!(
+            out.trim(),
+            // (the space before the comment is part of the right operand,
+            // as it always has been)
+            "if s~=\"\u{e9}\" then x=peek(a) else y=lshr(3, b ) end -- \u{e9}",
+            "got: {out:?}"
+        );
+        // A non-ASCII char in code position is not a Lua identifier; the
+        // token-level passes leave such a line alone rather than guessing.
+        assert_eq!(
+            preprocess_pico8("x=@\u{e9}\n").trim(),
+            "x=@\u{e9}",
+            "non-identifier operand must be left unchanged"
+        );
+    }
+
+    #[test]
+    fn test_button_glyphs_become_literals() {
+        // PICO-8 predefines ⬅️=0 ➡️=1 ⬆️=2 ⬇️=3 🅾️=4 ❎=5 as globals; Lua 5.4
+        // cannot lex the glyphs, so they become numeric literals in code.
+        let out = preprocess_pico8("if (btn(\u{2b05}\u{fe0f})) x-=1\n");
+        assert_eq!(out.trim(), "if btn(0) then x = x - (1) end", "got: {out:?}");
+        let out = preprocess_pico8("if btn(\u{274e}) then x=1 end\n");
+        assert_eq!(out.trim(), "if btn(5) then x=1 end", "got: {out:?}");
+        // All six, with and without the U+FE0F variation selector.
+        let out = preprocess_pico8(
+            "t={\u{2b05},\u{27a1}\u{fe0f},\u{2b06},\u{2b07}\u{fe0f},\u{1f17e}\u{fe0f},\u{274e}}\n",
+        );
+        assert_eq!(out.trim(), "t={0,1,2,3,4,5}", "got: {out:?}");
+        // `btnp` and expression positions.
+        let out = preprocess_pico8("x = btnp(\u{1f17e}\u{fe0f}) and \u{2b06}\u{fe0f}+1\n");
+        assert_eq!(out.trim(), "x = btnp(4) and 2+1", "got: {out:?}");
+    }
+
+    #[test]
+    fn test_button_glyphs_untouched_in_strings_and_comments() {
+        let src = "print(\"\u{2b05}\u{fe0f}\")\n";
+        assert_eq!(
+            preprocess_pico8(src),
+            src,
+            "string interior must be untouched"
+        );
+        let src = "print('\u{274e}') -- press \u{274e}\n";
+        assert_eq!(preprocess_pico8(src), src, "string + comment untouched");
+        // Code glyph next to a string glyph: only the code one changes.
+        let out = preprocess_pico8("if (btn(\u{274e})) print(\"\u{274e}\")\n");
+        assert_eq!(
+            out.trim(),
+            "if btn(5) then print(\"\u{274e}\") end",
+            "got: {out:?}"
+        );
+        // A glyph fused to identifier characters is a different identifier in
+        // PICO-8; do not turn it into a number.
+        let src = "x\u{2b05}\u{fe0f}=1\n";
+        assert_eq!(preprocess_pico8(src), src);
+        let src = "\u{274e}x=1\n";
+        assert_eq!(preprocess_pico8(src), src);
+        // Other non-ASCII code chars are left alone.
+        let src = "\u{e9}=1\n";
+        assert_eq!(preprocess_pico8(src), src);
     }
 
     #[test]
@@ -1017,6 +2249,22 @@ mod tests {
     fn test_mod_equals() {
         let out = preprocess_pico8("x%=10\n");
         assert_eq!(out.trim(), "x = x % (10)");
+    }
+
+    #[test]
+    fn test_compound_assign_with_trailing_semicolon() {
+        // Regression: `t /= d;` must not capture the `;` inside the parens
+        // (real BBS carts write statements with trailing semicolons).
+        let out = preprocess_pico8("t /= d;\n");
+        assert_eq!(out.trim(), "t = t / (d);");
+    }
+
+    #[test]
+    fn test_shorthand_if_with_trailing_comment() {
+        // Regression: a `--comment` after the statement must be moved AFTER the
+        // synthesized `end`, not left to swallow it.
+        let out = preprocess_pico8("if(x)return--bye\n");
+        assert_eq!(out.trim(), "if x then return end --bye");
     }
 
     #[test]
@@ -1251,16 +2499,19 @@ mod tests {
 
     #[test]
     fn test_floor_division_passthrough() {
-        // `//` is valid Lua 5.4 floor division; ensure it's not mangled
+        // In PICO-8's Lua, `//` is a SHORT COMMENT, not floor division
+        // (z8lua llex.c: "'/' or '/=' or '//' (short comment)"; integer
+        // division is `\`). So `x = a // b` comments out `// b`.
         let out = preprocess_pico8("x = a // b\n");
-        assert_eq!(out.trim(), "x = a // b");
+        assert_eq!(out.trim(), "x = a -- b");
     }
 
     #[test]
-    fn test_floor_division_not_comment() {
-        // // should NOT be treated as a comment (PICO-8 uses -- for comments)
+    fn test_floor_division_is_comment() {
+        // PICO-8 treats `//` as a short comment (verified vs z8lua). The `// 3`
+        // becomes a `-- 3` comment; the following line is unaffected.
         let out = preprocess_pico8("x = 10 // 3\ny=2\n");
-        assert!(out.contains("x = 10 // 3"));
+        assert!(out.contains("x = 10 -- 3"), "got: {out}");
         assert!(out.contains("y=2"));
     }
 
@@ -1407,21 +2658,21 @@ mod tests {
     }
 
     #[test]
-    fn test_div_equals_not_confused_with_floor_div() {
-        // /= is divide-assign, // is floor division
+    fn test_div_equals_not_confused_with_double_slash_comment() {
+        // /= is divide-assign; // starts a short comment in PICO-8.
         let out1 = preprocess_pico8("x/=2\n");
         assert_eq!(out1.trim(), "x = x / (2)");
 
         let out2 = preprocess_pico8("x = y // 2\n");
-        assert_eq!(out2.trim(), "x = y // 2");
+        assert_eq!(out2.trim(), "x = y -- 2");
     }
 
     #[test]
     fn test_pico8_cart_header_comment() {
-        // The first line of a .p8 cart often has `//` in a comment context,
-        // but it's actually just text. Ensure it passes through.
+        // `//` starts a PICO-8 short comment; the first `//` converts to `--`
+        // and the rest (including the `//` in the URL) becomes comment text.
         let out = preprocess_pico8("pico-8 cartridge // http://www.pico-8.com\n");
-        assert_eq!(out.trim(), "pico-8 cartridge // http://www.pico-8.com");
+        assert_eq!(out.trim(), "pico-8 cartridge -- http://www.pico-8.com");
     }
 
     #[test]

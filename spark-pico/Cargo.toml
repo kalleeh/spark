@@ -21,8 +21,22 @@ mipidsi = "0.8"
 embedded-graphics-core = "0.4"
 display-interface-spi = "0.5"
 fugit = "0.3"
-panic-halt = "1.0"
 critical-section = "1.2"
+
+# PIO assembler + proc-macro for the Tufty 2350 parallel LCD driver
+# (`board/tufty2350/lcd.rs`). Both are already in the dependency graph via
+# rp235x-hal, so they cost nothing on the pico2 build.
+pio = "0.3"
+pio-proc = "0.3"
+
+# Exactly one board feature must be enabled (checked in `board/mod.rs`).
+#   board-pico2     -- Pico 2 + SPI ST7789 128x128 LCD, 8 GPIO buttons, PWM audio
+#   board-tufty2350 -- Pimoroni Tufty 2350 (parallel LCD, 6 buttons, PSRAM), see
+#                      docs/tufty2350-port.md
+[features]
+default = ["board-pico2"]
+board-pico2 = []
+board-tufty2350 = []
 
 [build-dependencies]
 cc = "1.0"

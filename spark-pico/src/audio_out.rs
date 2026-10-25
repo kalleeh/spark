@@ -1,143 +1,241 @@
-// PWM audio output for RP2350
-//
-// Drives a speaker (or piezo) through a PWM pin. The PICO-8 audio engine
-// produces mono f32 samples in the range -1.0..1.0; this module converts
-// each sample to a PWM duty-cycle value and outputs it at the requested
-// sample rate using busy-wait timing.
-//
-// Hardware setup
-// --------------
-// GPIO 8 -> low-pass RC filter (e.g. 1 kOhm + 100 nF) -> speaker/amplifier
-//
-// GPIO 8 is on PWM slice 4, channel A.  This pin is free in the current
-// Spark hardware layout (GPIO 0-7 = buttons, GPIO 17-22 = display).
-//
-// PWM configuration
-// -----------------
-// - TOP = 255  -> 8-bit resolution per sample
-// - Clock divider = 1 (no division)
-// - PWM frequency = 150 MHz / 256 = ~586 kHz (well above audible range,
-//   easily filtered by a simple RC low-pass)
-//
-// Sample rate timing
-// ------------------
-// The sample rate (default 22050 Hz) is maintained by busy-waiting between
-// samples using `cortex_m::asm::delay`.
-//
-// On Cortex-M33 (Armv8-M), the `delay` intrinsic compiles to a tight
-// loop: `1: subs r0, #1; bne 1b`.  Each iteration takes exactly 3 cycles
-// (1 for SUBS + 1 for BNE-taken + 1 pipeline refill on some M33 variants).
-// At 150 MHz, `delay(150_000_000 / 22050) = delay(6802)` produces a
-// ~45.3 us period per sample, matching the 22050 Hz target within <0.1%.
-//
-// The Cortex-M33 in the RP2350 runs from tightly-coupled SRAM with zero
-// wait states, so the delay loop timing is deterministic.  Flash XIP would
-// add variable latency from cache misses, but the rp235x-hal boot2
-// copies critical code to SRAM.
+//! PWM audio output for RP2350, driven from a timer interrupt.
+//!
+//! The PICO-8 audio engine produces mono `f32` samples in `-1.0..1.0`. This
+//! module converts them to 8-bit PWM duty values, queues them in a ring
+//! buffer, and a 22 050 Hz interrupt pops one per tick into the PWM compare
+//! register. The main loop is therefore free to be paced by the system timer
+//! (see `main.rs`); audio no longer doubles as a busy-wait frame pacer, which
+//! is what made every frame 38-45 ms with an audible gap between frames.
+//!
+//! Hardware
+//! --------
+//! * GPIO 8 -> low-pass RC filter (e.g. 1 kOhm + 100 nF) -> speaker/amplifier.
+//!   GPIO 8 is PWM slice 4, channel A. Slice 4 is the *carrier*: TOP = 255,
+//!   phase-correct, divider 1 -> 150 MHz / 512 = ~293 kHz, far above audio
+//!   and trivially filtered.
+//! * PWM slice 5 (no pin attached) is the *sample clock*: it free-runs with a
+//!   wrap period of `sys_hz / 22050` cycles and raises `PWM_IRQ_WRAP_0` on
+//!   every wrap. Its top is `sys_hz / SAMPLE_RATE` (period one cycle longer),
+//!   so it ticks at 22 049.1 Hz -- 0.004 % *slower* than the producer. The
+//!   ring therefore fills very slowly (~1 sample/s) instead of draining, and
+//!   the producer's block-when-full backstop absorbs the drift once every
+//!   ~20 min instead of the ISR under-running twice a second.
+//!
+//! Concurrency invariants
+//! ----------------------
+//! Single producer / single consumer:
+//! * `push_samples` (producer) runs only on the main thread.
+//! * `PWM_IRQ_WRAP_0` (consumer) is the only interrupt handler in the
+//!   firmware, and it touches **only** the statics in this module -- never
+//!   the console, audio engine or Lua state.
+//! * `HEAD` is written only by the producer, `TAIL` only by the consumer.
+//!   Both are monotonically increasing (wrapping) counters; the ring index is
+//!   `counter % RING_LEN` and the fill level is `HEAD - TAIL`, so full
+//!   (`fill == RING_LEN`) and empty (`fill == 0`) are distinguishable.
+//! * Sample bytes are published with a Release store to `HEAD` after the
+//!   ring slot is written, and consumed after an Acquire load of `HEAD`.
+//! * The PWM slice handles live in a `critical_section::Mutex` and are only
+//!   touched inside the ISR (after `start`).
+//!
+//! Underrun (ring empty when the ISR fires) holds the last duty value, which
+//! is inaudible for a sample or two. Overrun cannot lose samples: the
+//! producer waits (`wfi`) for the ISR to free a slot.
+//!
+//! Board split
+//! -----------
+//! The PWM/IRQ half (`start`, `push_samples`, the ISR) exists only under the
+//! `board-pico2` feature; boards without audio hardware (`Board::audio ==
+//! None`) still use `SAMPLE_RATE`, `MAX_SAMPLES_PER_TICK` and `SampleClock`
+//! so the synth advances at the right rate.
 
+#[cfg(feature = "board-pico2")]
+use core::cell::RefCell;
+#[cfg(feature = "board-pico2")]
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
+#[cfg(feature = "board-pico2")]
+use critical_section::Mutex;
+#[cfg(feature = "board-pico2")]
 use embedded_hal::pwm::SetDutyCycle;
+#[cfg(feature = "board-pico2")]
+use rp235x_hal::pac::{interrupt, Interrupt};
+#[cfg(feature = "board-pico2")]
+use rp235x_hal::pwm::{FreeRunning, Pwm4, Pwm5, Slice};
 
-/// 8-bit PWM resolution (TOP register value).
+#[cfg(feature = "board-pico2")]
+use crate::board::AudioBackend;
+
+/// Audio sample rate in Hz. Must match what `Audio::generate_samples` is told.
+pub const SAMPLE_RATE: u32 = 22050;
+
+/// Upper bound on samples generated per game tick (30 fps is the slowest
+/// supported rate: 22050 / 30 = 735). `SampleClock::next` never exceeds it.
+pub const MAX_SAMPLES_PER_TICK: usize = SAMPLE_RATE.div_ceil(30) as usize;
+
+/// 8-bit PWM resolution (TOP register value) for the carrier slice.
+#[cfg(feature = "board-pico2")]
 const PWM_TOP: u16 = 255;
 
-/// Audio output driver backed by a single PWM channel.
+/// Duty value for silence (mid-rail).
+#[cfg(feature = "board-pico2")]
+const MID_DUTY: u8 = 128;
+
+/// Ring capacity in samples. Power of two, and comfortably more than two
+/// 30 fps frames (2 x 735 = 1470) so one late frame never under-runs.
+#[cfg(feature = "board-pico2")]
+const RING_LEN: usize = 2048;
+
+// Zero-initialised (not MID_DUTY) so it lives in .bss rather than costing 2 KB
+// of .data; every slot is written by the producer before the consumer reads it.
+#[cfg(feature = "board-pico2")]
+static RING: [AtomicU8; RING_LEN] = [const { AtomicU8::new(0) }; RING_LEN];
+/// Producer cursor (samples written so far).
+#[cfg(feature = "board-pico2")]
+static HEAD: AtomicUsize = AtomicUsize::new(0);
+/// Consumer cursor (samples played so far).
+#[cfg(feature = "board-pico2")]
+static TAIL: AtomicUsize = AtomicUsize::new(0);
+/// Last duty written to the PWM; repeated on underrun to avoid a step.
+#[cfg(feature = "board-pico2")]
+static LAST_DUTY: AtomicU8 = AtomicU8::new(MID_DUTY);
+
+/// The two PWM slices, owned by the ISR after `start`.
+#[cfg(feature = "board-pico2")]
+struct Hw {
+    /// Carrier on GPIO 8 (channel A).
+    carrier: Slice<Pwm4, FreeRunning>,
+    /// Sample-rate tick source; its wrap interrupt drives everything.
+    tick: Slice<Pwm5, FreeRunning>,
+}
+
+#[cfg(feature = "board-pico2")]
+static HW: Mutex<RefCell<Option<Hw>>> = Mutex::new(RefCell::new(None));
+
+/// Configure both PWM slices and start the sample-rate interrupt.
 ///
-/// The type parameter `P` is the concrete PWM channel type returned by
-/// rp235x-hal after calling `channel_a.output_to(pin)` and converting the
-/// slice to `FreeRunning` mode.
-pub struct AudioOut<P: SetDutyCycle> {
-    pwm_channel: P,
-    /// CPU cycles to delay between samples, pre-computed from sys_freq and
-    /// sample_rate to avoid division in the hot loop.
-    delay_cycles: u32,
-    /// Audio sample rate in Hz.
-    sample_rate: u32,
+/// `hw.carrier.channel_a` must already be routed to the audio pin
+/// (`output_to`, done by `board::init`). `sys_hz` is the system clock
+/// (150 MHz on a stock Pico 2).
+#[cfg(feature = "board-pico2")]
+pub fn start(hw: AudioBackend, sys_hz: u32) {
+    let AudioBackend {
+        mut carrier,
+        mut tick,
+    } = hw;
+    carrier.set_ph_correct();
+    carrier.set_top(PWM_TOP);
+    carrier.set_div_int(1);
+    carrier.set_div_frac(0);
+    // Mid-rail before enabling so there is no DC pop at power-up.
+    let _ = carrier.channel_a.set_duty_cycle(MID_DUTY as u16);
+    carrier.enable();
+
+    // Wrap period is TOP + 1 cycles; see the module docs for why we round
+    // the period *up* (slightly slow) rather than to nearest.
+    let top = (sys_hz / SAMPLE_RATE).min(u16::MAX as u32) as u16;
+    tick.set_top(top);
+    tick.set_div_int(1);
+    tick.set_div_frac(0);
+    tick.clear_interrupt();
+    tick.enable_interrupt0();
+    tick.enable();
+
+    critical_section::with(|cs| {
+        HW.borrow(cs).replace(Some(Hw { carrier, tick }));
+    });
+
+    // Safety: the handler below is the only user of the PWM slices and of the
+    // ring statics' consumer side; unmasking after `HW` is populated means it
+    // never observes `None` in steady state.
+    unsafe {
+        cortex_m::peripheral::NVIC::unmask(Interrupt::PWM_IRQ_WRAP_0);
+    }
 }
 
-impl<P: SetDutyCycle> AudioOut<P> {
-    /// Create a new audio output driver.
-    ///
-    /// * `pwm_channel` -- A PWM channel already configured and enabled.
-    /// * `sys_freq`    -- System clock frequency in Hz (typically 150_000_000).
-    /// * `sample_rate` -- Desired audio sample rate (e.g. 22050).
-    pub fn new(pwm_channel: P, sys_freq: u32, sample_rate: u32) -> Self {
+/// Convert one `-1.0..1.0` sample to a PWM duty value.
+#[cfg(feature = "board-pico2")]
+#[inline]
+fn to_duty(sample: f32) -> u8 {
+    // Manual clamp avoids pulling in the f32 clamp libcall; NaN falls through
+    // both comparisons and the `as u8` cast then saturates to 0 -- acceptable
+    // for a value that should never occur.
+    let s = if sample > 1.0 {
+        1.0
+    } else if sample < -1.0 {
+        -1.0
+    } else {
+        sample
+    };
+    ((s + 1.0) * (PWM_TOP as f32 * 0.5)) as u8
+}
+
+/// Queue a block of samples for playback.
+///
+/// Blocks (sleeping with `wfi`, woken by the 22 kHz tick) while the ring is
+/// full, so no sample is ever dropped. Only call after [`start`]; before it
+/// there is no consumer and a full ring would wait forever.
+#[cfg(feature = "board-pico2")]
+pub fn push_samples(samples: &[f32]) {
+    let mut head = HEAD.load(Ordering::Relaxed);
+    for &sample in samples {
+        // Wait for at least one free slot.
+        while head.wrapping_sub(TAIL.load(Ordering::Acquire)) >= RING_LEN {
+            cortex_m::asm::wfi();
+        }
+        RING[head % RING_LEN].store(to_duty(sample), Ordering::Relaxed);
+        head = head.wrapping_add(1);
+        HEAD.store(head, Ordering::Release);
+    }
+}
+
+/// Splits `SAMPLE_RATE` samples/second evenly across game ticks at `fps`,
+/// carrying the remainder so the long-run average is exact (60 fps is not an
+/// integer number of samples per tick: 367.5).
+pub struct SampleClock {
+    fps: u32,
+    rem: u32,
+}
+
+impl SampleClock {
+    pub fn new(fps: u32) -> Self {
         Self {
-            pwm_channel,
-            delay_cycles: sys_freq / sample_rate,
-            sample_rate,
+            fps: fps.max(1),
+            rem: 0,
         }
     }
 
-    /// Return the configured sample rate.
-    #[inline]
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    /// Return the number of samples to generate per frame at the given FPS.
-    #[inline]
-    pub fn samples_per_frame(&self, fps: u32) -> usize {
-        (self.sample_rate / fps) as usize
-    }
-
-    /// Play a buffer of f32 audio samples through PWM.
-    ///
-    /// Each sample is expected to be in the range -1.0..1.0.  The function
-    /// converts each to an 8-bit duty cycle and busy-waits between samples
-    /// to maintain the configured sample rate.
-    ///
-    /// This is a blocking call -- it returns only after all samples have been
-    /// output.  At 22050 Hz and 30 fps that is ~735 samples taking ~33 ms,
-    /// which consumes most of the frame budget.  In practice the display
-    /// update and game logic run first, then audio fills the remaining time
-    /// and doubles as frame pacing.
-    ///
-    /// # Timing accuracy
-    ///
-    /// The delay between samples is `sys_freq / sample_rate` CPU cycles.
-    /// At 150 MHz / 22050 Hz = 6802 cycles. The `set_duty_cycle` call and
-    /// loop overhead add ~10-20 cycles, which is <0.3% error -- well within
-    /// acceptable bounds for audio playback.
-    pub fn play_samples(&mut self, samples: &[f32]) {
-        let delay = self.delay_cycles;
-
-        for &sample in samples {
-            // Convert -1.0..1.0 to 0..PWM_TOP duty cycle.
-            //
-            // clamp manually to avoid pulling in the f32 clamp libcall
-            let clamped = if sample > 1.0 {
-                1.0f32
-            } else if sample < -1.0 {
-                -1.0f32
-            } else {
-                sample
-            };
-            let duty = ((clamped + 1.0) * 0.5 * PWM_TOP as f32) as u16;
-
-            // Set the duty cycle.  The error type for rp235x-hal PWM is
-            // `core::convert::Infallible`, so ignoring the result is safe.
-            let _ = self.pwm_channel.set_duty_cycle(duty);
-
-            // Wait one sample period.
-            //
-            // On Cortex-M33, `cortex_m::asm::delay(n)` executes a tight
-            // SUBS/BNE loop consuming exactly `n` iterations. Each iteration
-            // is 3 cycles, so the total delay is `3 * n` cycles. The
-            // rp235x-hal `delay` function accounts for this internally.
-            cortex_m::asm::delay(delay);
-        }
-    }
-
-    /// Set the PWM output to the midpoint (silence) without producing any
-    /// audio.  Useful to call once at startup to avoid a DC offset pop.
-    pub fn silence(&mut self) {
-        let mid = PWM_TOP / 2;
-        let _ = self.pwm_channel.set_duty_cycle(mid);
+    /// Number of samples to generate for the next tick (never more than
+    /// [`MAX_SAMPLES_PER_TICK`] for fps >= 30).
+    pub fn next(&mut self) -> usize {
+        let total = SAMPLE_RATE + self.rem;
+        self.rem = total % self.fps;
+        ((total / self.fps) as usize).min(MAX_SAMPLES_PER_TICK)
     }
 }
 
-/// PWM TOP value used by this module.  Callers need this to configure the
-/// PWM slice's TOP register before constructing `AudioOut`.
-pub const fn pwm_top() -> u16 {
-    PWM_TOP
+/// 22 050 Hz sample tick: pop one duty value into the carrier PWM.
+#[cfg(feature = "board-pico2")]
+#[interrupt]
+fn PWM_IRQ_WRAP_0() {
+    critical_section::with(|cs| {
+        let mut hw = HW.borrow_ref_mut(cs);
+        let Some(hw) = hw.as_mut() else {
+            return;
+        };
+        hw.tick.clear_interrupt();
+
+        let tail = TAIL.load(Ordering::Relaxed);
+        let head = HEAD.load(Ordering::Acquire);
+        let duty = if head == tail {
+            // Underrun: hold the previous level.
+            LAST_DUTY.load(Ordering::Relaxed)
+        } else {
+            let d = RING[tail % RING_LEN].load(Ordering::Relaxed);
+            TAIL.store(tail.wrapping_add(1), Ordering::Release);
+            LAST_DUTY.store(d, Ordering::Relaxed);
+            d
+        };
+        // Infallible on rp235x-hal.
+        let _ = hw.carrier.channel_a.set_duty_cycle(duty as u16);
+    });
 }

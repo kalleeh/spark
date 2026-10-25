@@ -7,6 +7,18 @@
  */
 
 #include "luacompat.h"
+#include "lua.h"
+
+/*
+ * The Rust FFI layer (src/lua_ffi.rs) declares lua_Number as f32 and
+ * lua_Integer as i32. On a hard-float ABI a double is passed in d0 while a
+ * float is passed in s0, so a mismatch here would silently corrupt every
+ * number crossing the boundary. Fail the build instead.
+ */
+_Static_assert(sizeof(lua_Number) == 4, "lua_Number must be float (build with -DLUA_32BITS=1)");
+_Static_assert(sizeof(lua_Integer) == 4, "lua_Integer must be 32-bit (build with -DLUA_32BITS=1)");
+_Static_assert(sizeof(lua_Unsigned) == 4, "lua_Unsigned must be 32-bit");
+_Static_assert(LUAI_MAXSTACK == 2000, "LUAI_MAXSTACK override from build.rs was not applied");
 
 /* ======================================================================== */
 /*  Rust allocator bridge                                                   */
@@ -1295,7 +1307,7 @@ int snprintf(char *buf, size_t size, const char *fmt, ...) {
 int sprintf(char *buf, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    int ret = vsnprintf(buf, (size_t)-1, fmt, ap);
+    int ret = vsnprintf(buf, (size_t)INT_MAX, fmt, ap);
     va_end(ap);
     return ret;
 }
@@ -1582,63 +1594,17 @@ char *setlocale(int category, const char *locale) {
 /* ======================================================================== */
 /*  math functions                                                          */
 /*                                                                          */
-/*  Lua 5.4 with LUA_32BITS uses float (lua_Number) but some internal code */
-/*  still references double variants.  We provide both.                     */
-/*  We use GCC/Clang __builtin_ intrinsics which the compiler can lower to */
-/*  hardware FPU instructions or soft-float library calls as appropriate.   */
+/*  NOT defined here. The previous definitions were of the form            */
+/*      double sin(double x) { return __builtin_sin(x); }                  */
+/*  and the compiler lowers __builtin_sin back to a call to `sin`, i.e.     */
+/*  every one of them recursed until the stack overflowed (GCC reports     */
+/*  -Winfinite-recursion). With LUA_USE_C89, Lua's l_mathop(op) expands to */
+/*  the double-precision `op`, so `//`, `%`, `^`, float->int coercion and  */
+/*  math.* all hit these. They are now provided by Rust (src/cmath.rs) on   */
+/*  top of the `libm` crate; the prototypes stay in luacompat.h. To see     */
+/*  which symbols the Lua objects need:                                     */
+/*      arm-none-eabi-nm -u <lua objects> | grep -vE 'lua|__aeabi'          */
 /* ======================================================================== */
-
-double floor(double x) { return __builtin_floor(x); }
-double ceil(double x) { return __builtin_ceil(x); }
-double fabs(double x) { return __builtin_fabs(x); }
-double sqrt(double x) { return __builtin_sqrt(x); }
-double sin(double x) { return __builtin_sin(x); }
-double cos(double x) { return __builtin_cos(x); }
-double tan(double x) { return __builtin_tan(x); }
-double asin(double x) { return __builtin_asin(x); }
-double acos(double x) { return __builtin_acos(x); }
-double atan(double x) { return __builtin_atan(x); }
-double atan2(double y, double x) { return __builtin_atan2(y, x); }
-double pow(double x, double y) { return __builtin_pow(x, y); }
-double fmod(double x, double y) { return __builtin_fmod(x, y); }
-double exp(double x) { return __builtin_exp(x); }
-double log(double x) { return __builtin_log(x); }
-double log2(double x) { return __builtin_log2(x); }
-double log10(double x) { return __builtin_log10(x); }
-double ldexp(double x, int n) { return __builtin_ldexp(x, n); }
-double frexp(double x, int *exp) { return __builtin_frexp(x, exp); }
-
-double modf(double x, double *iptr) {
-    double i = __builtin_floor(x);
-    *iptr = i;
-    return x - i;
-}
-
-float floorf(float x) { return __builtin_floorf(x); }
-float ceilf(float x) { return __builtin_ceilf(x); }
-float fabsf(float x) { return __builtin_fabsf(x); }
-float sqrtf(float x) { return __builtin_sqrtf(x); }
-float sinf(float x) { return __builtin_sinf(x); }
-float cosf(float x) { return __builtin_cosf(x); }
-float tanf(float x) { return __builtin_tanf(x); }
-float asinf(float x) { return __builtin_asinf(x); }
-float acosf(float x) { return __builtin_acosf(x); }
-float atanf(float x) { return __builtin_atanf(x); }
-float atan2f(float y, float x) { return __builtin_atan2f(y, x); }
-float powf(float x, float y) { return __builtin_powf(x, y); }
-float fmodf(float x, float y) { return __builtin_fmodf(x, y); }
-float expf(float x) { return __builtin_expf(x); }
-float logf(float x) { return __builtin_logf(x); }
-float log2f(float x) { return __builtin_log2f(x); }
-float log10f(float x) { return __builtin_log10f(x); }
-float ldexpf(float x, int n) { return __builtin_ldexpf(x, n); }
-float frexpf(float x, int *exp) { return __builtin_frexpf(x, exp); }
-
-float modff(float x, float *iptr) {
-    float i = __builtin_floorf(x);
-    *iptr = i;
-    return x - i;
-}
 
 /* ======================================================================== */
 /*  signal stubs                                                            */
@@ -1706,21 +1672,35 @@ size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm) {
 /*  For Thumb-2 (Cortex-M), we use .thumb_func.                            */
 /* ======================================================================== */
 
+/*
+ * jmp_buf layout (int[32], 26 words used):
+ *   [0..7]   r4-r11          integer callee-saved registers
+ *   [8]      sp
+ *   [9]      lr
+ *   [10..25] s16-s31         FP callee-saved registers (hard-float ABI)
+ *
+ * s16-s31 must be saved too: with -mfloat-abi=hard the compiler keeps float
+ * values live in them across calls, and longjmp skips the epilogues of the
+ * frames it unwinds, so without this a Lua error (luaD_throw) would return
+ * to luaD_rawrunprotected's callers with corrupted float registers.
+ */
 __attribute__((naked))
-int setjmp(jmp_buf env) {
+int setjmp(jmp_buf env __attribute__((unused))) {
     __asm__ volatile (
         /* Save r4-r11, then sp and lr separately (SP not allowed in stmia on ARMv8-M) */
         "stmia r0!, {r4-r11}\n"
         "mov   r2, sp\n"
         "str   r2, [r0, #0]\n"   /* save sp */
         "str   lr, [r0, #4]\n"   /* save lr */
+        "add   r0, r0, #8\n"
+        "vstmia r0!, {s16-s31}\n"
         "movs  r0, #0\n"
         "bx    lr\n"
     );
 }
 
 __attribute__((naked, noreturn))
-void longjmp(jmp_buf env, int val) {
+void longjmp(jmp_buf env __attribute__((unused)), int val __attribute__((unused))) {
     __asm__ volatile (
         /* Restore r4-r11, then sp and lr separately */
         "ldmia r0!, {r4-r11}\n"
@@ -1728,6 +1708,8 @@ void longjmp(jmp_buf env, int val) {
         "mov   sp, r2\n"
         "ldr   r2, [r0, #4]\n"   /* restore lr */
         "mov   lr, r2\n"
+        "add   r2, r0, #8\n"
+        "vldmia r2!, {s16-s31}\n"
         "movs  r0, r1\n"
         "it    eq\n"              /* if val == 0, set it to 1 */
         "moveq r0, #1\n"

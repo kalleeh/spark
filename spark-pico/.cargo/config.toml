@@ -1,0 +1,11 @@
+# Default target for the RP2350 firmware so a plain `cargo build` from inside
+# `spark-pico/` produces the embedded ELF.
+#
+# The linker arguments (`-Tlink.x`, `--nmagic`) are emitted by `build.rs` via
+# `cargo:rustc-link-arg-bins`, NOT here: cargo only reads this file when the
+# current directory is inside `spark-pico/`, so rustflags placed here were
+# silently dropped when building from the workspace root and the firmware
+# failed to link. Do not add them back here -- passing `-Tlink.x` twice would
+# feed the linker script to the linker twice.
+[build]
+target = "thumbv8m.main-none-eabihf"

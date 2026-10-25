@@ -121,8 +121,13 @@
 
 /*
 @@ LUA_32BITS enables Lua with 32-bit integers and 32-bit floats.
+** Spark: guarded so the build script's -DLUA_32BITS=1 is honoured. The
+** unguarded stock definition silently overrode it, leaving lua_Number as
+** double while the Rust FFI declared f32 -- an ABI mismatch on hard-float.
 */
+#if !defined(LUA_32BITS)
 #define LUA_32BITS	0
+#endif
 
 
 /*
@@ -745,10 +750,12 @@
 ** space (and to reserve some numbers for pseudo-indices).
 ** (It must fit into max(size_t)/32 and max(int)/2.)
 */
+#if !defined(LUAI_MAXSTACK)	/* Spark: allow -DLUAI_MAXSTACK from the build script */
 #if LUAI_IS32INT
 #define LUAI_MAXSTACK		1000000
 #else
 #define LUAI_MAXSTACK		15000
+#endif
 #endif
 
 

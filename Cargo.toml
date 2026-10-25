@@ -3,8 +3,18 @@ members = ["spark-core", "spark-desktop", "spark-pico"]
 default-members = ["spark-core", "spark-desktop"]
 resolver = "2"
 
+# Desktop release: full speed for the rasterizer + Lua glue.
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true
 codegen-units = 1
 strip = "symbols"
+
+# RP2350 firmware: optimize for flash size, keep DWARF so probe-rs/gdb can
+# symbolize a HardFault (debug info is not flashed). Build with
+#   cargo build --profile pico -p spark-pico --target thumbv8m.main-none-eabihf
+[profile.pico]
+inherits = "release"
+opt-level = "s"
+debug = 2
+strip = false

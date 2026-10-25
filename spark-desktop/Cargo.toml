@@ -4,12 +4,39 @@ version = "0.1.0"
 edition = "2021"
 description = "Desktop target for the Spark fantasy console"
 
+[lib]
+name = "spark_desktop_lib"
+path = "src/lib.rs"
+
 [[bin]]
 name = "spark"
 path = "src/main.rs"
 
+[[example]]
+name = "cart_check"
+path = "examples/cart_check.rs"
+
+# Deterministic robustness fuzzers (documented tools, see README): each hammers
+# one untrusted-input surface and exits non-zero on a panic.
+[[example]]
+name = "fuzz_engine"
+path = "examples/fuzz_engine.rs"
+
+[[example]]
+name = "fuzz_loader"
+path = "examples/fuzz_loader.rs"
+
+[[example]]
+name = "fuzz_audio"
+path = "examples/fuzz_audio.rs"
+
 [dependencies]
-macroquad = { version = "0.4", features = ["audio"] }
+# Audio is handled by a cpal streaming backend (see audio_output.rs), not
+# macroquad's chunk-based Sound API, so the "audio" feature is intentionally
+# left off to avoid two backends contending for the output device.
+macroquad = { version = "0.4", default-features = false }
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 png = "0.17"
 spark-core = { path = "../spark-core", features = ["std"] }
+cpal = "0.15"
+ringbuf = "0.4"

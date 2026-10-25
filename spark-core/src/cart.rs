@@ -5,6 +5,7 @@ use crate::audio::{MusicPattern, Note, Sfx, NOTES_PER_SFX, NUM_MUSIC, NUM_SFX};
 use crate::console::{MAP_SIZE, SPRITE_SHEET_SIZE};
 
 /// All data parsed from a .p8 cart file.
+#[derive(PartialEq)]
 pub struct CartData {
     pub code: String,
     pub sprites: [u8; SPRITE_SHEET_SIZE], // 128*128 pixel color indices (0-15)
@@ -15,14 +16,16 @@ pub struct CartData {
 }
 
 impl CartData {
-    pub fn new() -> Self {
+    /// An empty cart. `const` so the firmware can construct it in place
+    /// (see `parse_cart_into`) without a ~33 KB stack temporary.
+    pub const fn new() -> Self {
         CartData {
             code: String::new(),
             sprites: [0u8; SPRITE_SHEET_SIZE],
             map: [0u8; MAP_SIZE],
             flags: [0u8; 256],
-            sfx: [Sfx::default(); NUM_SFX],
-            music: [MusicPattern::default(); NUM_MUSIC],
+            sfx: [Sfx::new(); NUM_SFX],
+            music: [MusicPattern::new(); NUM_MUSIC],
         }
     }
 }
@@ -40,13 +43,30 @@ impl Default for CartData {
 /// Parse a .p8 cart from its source text (no file I/O).
 pub fn parse_cart(source: &str) -> CartData {
     let mut cart = CartData::new();
+    parse_cart_into(&mut cart, source);
+    cart
+}
 
+/// Parse a .p8 cart into an existing, freshly constructed `CartData`.
+///
+/// Sections present in `source` overwrite the corresponding fields; anything
+/// absent is left as `cart` had it. Exists so callers with a tiny stack (the
+/// firmware) can parse straight into a heap or static slot instead of
+/// receiving the ~33 KB struct by value.
+pub fn parse_cart_into(cart: &mut CartData, source: &str) {
     let mut current_section = "";
     let mut section_lines: Vec<&str> = Vec::new();
 
+    // Number of `__map__` rows the file supplied explicitly (PICO-8 writes 32;
+    // rows 32-63 live in the shared upper sprite sheet, see below).
+    let mut map_rows = 0usize;
+
     for line in source.lines() {
         if line.starts_with("__") && line.ends_with("__") {
-            process_section(current_section, &section_lines, &mut cart);
+            process_section(current_section, &section_lines, cart);
+            if current_section == "__map__" {
+                map_rows = section_lines.len();
+            }
             current_section = line.trim();
             section_lines.clear();
         } else if !current_section.is_empty() {
@@ -54,9 +74,32 @@ pub fn parse_cart(source: &str) -> CartData {
         }
     }
     // Flush the final section.
-    process_section(current_section, &section_lines, &mut cart);
+    process_section(current_section, &section_lines, cart);
+    if current_section == "__map__" {
+        map_rows = section_lines.len();
+    }
 
-    cart
+    if map_rows <= 32 {
+        mirror_shared_map_rows(cart);
+    }
+}
+
+/// PICO-8 memory aliases map rows 32-63 (`0x1000-0x1FFF`) onto sprite-sheet
+/// rows 64-127. A standard `.p8` file only stores 32 `__map__` rows, and the
+/// lower half of the map is encoded in the `__gfx__` section instead. Mirror
+/// those pixels into `map` so `mget`/`map()` see them (two 4-bit pixels per
+/// tile byte, low nibble = left pixel — the same packing as `peek`).
+fn mirror_shared_map_rows(cart: &mut CartData) {
+    // Map byte (x, y>=32) is at address 0x1000 + (y-32)*128 + x; each address
+    // holds two sheet pixels, so pixel index = 0x2000 + (y-32)*256 + 2x.
+    for y in 32..64 {
+        let row_px = SPRITE_SHEET_SIZE / 2 + (y - 32) * 256;
+        for x in 0..128 {
+            let left = cart.sprites[row_px + x * 2] & 0x0F;
+            let right = cart.sprites[row_px + x * 2 + 1] & 0x0F;
+            cart.map[y * 128 + x] = left | (right << 4);
+        }
+    }
 }
 
 fn process_section(name: &str, lines: &[&str], cart: &mut CartData) {
@@ -69,11 +112,8 @@ fn process_section(name: &str, lines: &[&str], cart: &mut CartData) {
                 if y >= 128 {
                     break;
                 }
-                for (x, ch) in line.chars().enumerate() {
-                    if x >= 128 {
-                        break;
-                    }
-                    cart.sprites[y * 128 + x] = hex_char_to_u8(ch);
+                for (x, &b) in line.as_bytes().iter().take(128).enumerate() {
+                    cart.sprites[y * 128 + x] = hex_char_to_u8(b);
                 }
             }
         }
@@ -83,8 +123,8 @@ fn process_section(name: &str, lines: &[&str], cart: &mut CartData) {
                 let bytes = line.as_bytes();
                 let mut j = 0;
                 while j + 1 < bytes.len() && i < 256 {
-                    let hi = hex_char_to_u8(bytes[j] as char);
-                    let lo = hex_char_to_u8(bytes[j + 1] as char);
+                    let hi = hex_char_to_u8(bytes[j]);
+                    let lo = hex_char_to_u8(bytes[j + 1]);
                     cart.flags[i] = (hi << 4) | lo;
                     i += 1;
                     j += 2;
@@ -100,8 +140,8 @@ fn process_section(name: &str, lines: &[&str], cart: &mut CartData) {
                 for x in 0..128 {
                     let idx = x * 2;
                     if idx + 1 < bytes.len() {
-                        let hi = hex_char_to_u8(bytes[idx] as char);
-                        let lo = hex_char_to_u8(bytes[idx + 1] as char);
+                        let hi = hex_char_to_u8(bytes[idx]);
+                        let lo = hex_char_to_u8(bytes[idx + 1]);
                         cart.map[y * 128 + x] = (hi << 4) | lo;
                     }
                 }
@@ -133,11 +173,13 @@ fn join_lines(lines: &[&str]) -> String {
 // Hex utilities
 // ---------------------------------------------------------------------------
 
-pub fn hex_char_to_u8(c: char) -> u8 {
+/// Decode one ASCII hex digit byte (`0-9a-fA-F`) to its value; anything else
+/// (including non-ASCII bytes) decodes as 0.
+pub fn hex_char_to_u8(c: u8) -> u8 {
     match c {
-        '0'..='9' => c as u8 - b'0',
-        'a'..='f' => c as u8 - b'a' + 10,
-        'A'..='F' => c as u8 - b'A' + 10,
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
         _ => 0,
     }
 }
@@ -185,18 +227,18 @@ fn parse_sfx_line(line: &str, sfx: &mut Sfx) {
     }
 
     // Bytes 2-3: speed
-    let speed_hi = hex_char_to_u8(bytes[2] as char);
-    let speed_lo = hex_char_to_u8(bytes[3] as char);
+    let speed_hi = hex_char_to_u8(bytes[2]);
+    let speed_lo = hex_char_to_u8(bytes[3]);
     sfx.speed = (speed_hi << 4) | speed_lo;
 
     // Bytes 4-5: loop start
-    let ls_hi = hex_char_to_u8(bytes[4] as char);
-    let ls_lo = hex_char_to_u8(bytes[5] as char);
+    let ls_hi = hex_char_to_u8(bytes[4]);
+    let ls_lo = hex_char_to_u8(bytes[5]);
     sfx.loop_start = (ls_hi << 4) | ls_lo;
 
     // Bytes 6-7: loop end
-    let le_hi = hex_char_to_u8(bytes[6] as char);
-    let le_lo = hex_char_to_u8(bytes[7] as char);
+    let le_hi = hex_char_to_u8(bytes[6]);
+    let le_lo = hex_char_to_u8(bytes[7]);
     sfx.loop_end = (le_hi << 4) | le_lo;
 
     // Notes: 32 notes, each 5 hex characters, starting at offset 8
@@ -205,11 +247,11 @@ fn parse_sfx_line(line: &str, sfx: &mut Sfx) {
         if base + 5 > bytes.len() {
             break;
         }
-        let c0 = hex_char_to_u8(bytes[base] as char);
-        let c1 = hex_char_to_u8(bytes[base + 1] as char);
-        let c2 = hex_char_to_u8(bytes[base + 2] as char);
-        let c3 = hex_char_to_u8(bytes[base + 3] as char);
-        let _c4 = hex_char_to_u8(bytes[base + 4] as char);
+        let c0 = hex_char_to_u8(bytes[base]);
+        let c1 = hex_char_to_u8(bytes[base + 1]);
+        let c2 = hex_char_to_u8(bytes[base + 2]);
+        let c3 = hex_char_to_u8(bytes[base + 3]);
+        let _c4 = hex_char_to_u8(bytes[base + 4]);
 
         sfx.notes[n] = Note {
             pitch: c0 | ((c2 & 1) << 4) | ((c3 & 1) << 5),
@@ -254,14 +296,14 @@ fn parse_music_line(line: &str, pat: &mut MusicPattern) {
         return;
     }
 
-    let flags_hi = hex_char_to_u8(hex_buf[0] as char);
-    let flags_lo = hex_char_to_u8(hex_buf[1] as char);
+    let flags_hi = hex_char_to_u8(hex_buf[0]);
+    let flags_lo = hex_char_to_u8(hex_buf[1]);
     pat.flags = (flags_hi << 4) | flags_lo;
 
     for ch in 0..4 {
         let base = 2 + ch * 2;
-        let hi = hex_char_to_u8(hex_buf[base] as char);
-        let lo = hex_char_to_u8(hex_buf[base + 1] as char);
+        let hi = hex_char_to_u8(hex_buf[base]);
+        let lo = hex_char_to_u8(hex_buf[base + 1]);
         pat.channels[ch] = (hi << 4) | lo;
     }
 }
@@ -275,8 +317,23 @@ fn parse_music_line(line: &str, pat: &mut MusicPattern) {
 /// The output is compatible with `parse_cart()` — a round-trip
 /// `parse_cart(&serialize_cart(&cart))` preserves all data.
 pub fn serialize_cart(cart: &CartData) -> String {
-    // Pre-allocate a reasonable capacity (a typical .p8 is ~30-40 KB).
-    let mut out = String::with_capacity(40_000);
+    // Exact size of the fixed sections (header + gfx + gff + map + sfx +
+    // music, each line newline-terminated) plus the code; avoids regrowth.
+    const FIXED_LEN: usize = "pico-8 cartridge // http://www.pico-8.com\n".len()
+        + "version 42\n".len()
+        + "__lua__\n".len()
+        + 1 // trailing newline after the code
+        + "__gfx__\n".len()
+        + 128 * (128 + 1)
+        + "__gff__\n".len()
+        + 2 * (256 + 1)
+        + "__map__\n".len()
+        + 64 * (256 + 1)
+        + "__sfx__\n".len()
+        + NUM_SFX * (168 + 1)
+        + "__music__\n".len()
+        + NUM_MUSIC * (11 + 1);
+    let mut out = String::with_capacity(FIXED_LEN + cart.code.len());
 
     // Header
     out.push_str("pico-8 cartridge // http://www.pico-8.com\n");
@@ -399,6 +456,7 @@ fn serialize_music_line(pat: &MusicPattern, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     #[test]
     fn test_parse_sfx_line_basic() {
@@ -436,8 +494,10 @@ mod tests {
     #[test]
     fn test_parse_sfx_line_all_zeros() {
         let line = "0".repeat(168);
-        let mut sfx = Sfx::default();
-        sfx.speed = 99;
+        let mut sfx = Sfx {
+            speed: 99,
+            ..Sfx::default()
+        };
         parse_sfx_line(&line, &mut sfx);
         assert_eq!(sfx.speed, 0);
         assert_eq!(sfx.loop_start, 0);
@@ -658,23 +718,22 @@ mod tests {
         assert_eq!(cart2.sprites, [0u8; SPRITE_SHEET_SIZE]);
         assert_eq!(cart2.map, [0u8; MAP_SIZE]);
         assert_eq!(cart2.flags, [0u8; 256]);
-        for i in 0..NUM_SFX {
-            // Default Sfx has speed=16, but serializing a new CartData
-            // writes speed=16 which round-trips correctly.
-            assert_eq!(cart2.sfx[i].speed, cart.sfx[i].speed, "sfx {} speed", i);
-            assert_eq!(cart2.sfx[i].loop_start, 0, "sfx {} loop_start", i);
-            assert_eq!(cart2.sfx[i].loop_end, 0, "sfx {} loop_end", i);
-        }
-        for i in 0..NUM_MUSIC {
-            assert_eq!(cart2.music[i].flags, 0, "music {} flags", i);
-            for ch in 0..4 {
-                assert_eq!(
-                    cart2.music[i].channels[ch], cart.music[i].channels[ch],
-                    "music {} channel {}",
-                    i, ch
-                );
-            }
-        }
+        // Default Sfx has speed=16, which round-trips correctly.
+        assert_eq!(cart2.sfx, cart.sfx);
+        assert_eq!(cart2.music, cart.music);
+        assert!(cart2 == cart);
+    }
+
+    #[test]
+    fn test_serialize_capacity_is_exact() {
+        // The pre-sized capacity must cover the whole output (no regrowth) and
+        // not over-allocate: an empty cart is exactly the fixed sections.
+        let text = serialize_cart(&CartData::new());
+        assert_eq!(text.capacity(), text.len(), "len {}", text.len());
+        let mut cart = CartData::new();
+        cart.code = String::from("print('hi')");
+        let text = serialize_cart(&cart);
+        assert_eq!(text.capacity(), text.len(), "len {}", text.len());
     }
 
     #[test]
@@ -871,20 +930,7 @@ mod tests {
         let text = serialize_cart(&cart);
         let cart2 = parse_cart(&text);
 
-        for i in 0..3 {
-            assert_eq!(
-                cart2.music[i].flags, cart.music[i].flags,
-                "music {} flags",
-                i
-            );
-            for ch in 0..4 {
-                assert_eq!(
-                    cart2.music[i].channels[ch], cart.music[i].channels[ch],
-                    "music {} channel {}",
-                    i, ch
-                );
-            }
-        }
+        assert_eq!(cart2.music[..3], cart.music[..3]);
 
         // Verify flag semantics
         assert!(cart2.music[0].is_loop_start());
@@ -1093,58 +1139,9 @@ mod tests {
             assert_eq!(cart2.map[i], cart.map[i], "map tile {}", i);
         }
 
-        // Verify SFX
-        for s in 0..NUM_SFX {
-            assert_eq!(cart2.sfx[s].speed, cart.sfx[s].speed, "sfx {} speed", s);
-            assert_eq!(
-                cart2.sfx[s].loop_start, cart.sfx[s].loop_start,
-                "sfx {} loop_start",
-                s
-            );
-            assert_eq!(
-                cart2.sfx[s].loop_end, cart.sfx[s].loop_end,
-                "sfx {} loop_end",
-                s
-            );
-            for n in 0..NOTES_PER_SFX {
-                assert_eq!(
-                    cart2.sfx[s].notes[n].pitch, cart.sfx[s].notes[n].pitch,
-                    "sfx {} note {} pitch",
-                    s, n
-                );
-                assert_eq!(
-                    cart2.sfx[s].notes[n].waveform, cart.sfx[s].notes[n].waveform,
-                    "sfx {} note {} waveform",
-                    s, n
-                );
-                assert_eq!(
-                    cart2.sfx[s].notes[n].volume, cart.sfx[s].notes[n].volume,
-                    "sfx {} note {} volume",
-                    s, n
-                );
-                assert_eq!(
-                    cart2.sfx[s].notes[n].effect, cart.sfx[s].notes[n].effect,
-                    "sfx {} note {} effect",
-                    s, n
-                );
-            }
-        }
-
-        // Verify music
-        for m in 0..NUM_MUSIC {
-            assert_eq!(
-                cart2.music[m].flags, cart.music[m].flags,
-                "music {} flags",
-                m
-            );
-            for ch in 0..4 {
-                assert_eq!(
-                    cart2.music[m].channels[ch], cart.music[m].channels[ch],
-                    "music {} channel {}",
-                    m, ch
-                );
-            }
-        }
+        assert_eq!(cart2.sfx, cart.sfx);
+        assert_eq!(cart2.music, cart.music);
+        assert!(cart2 == cart);
     }
 
     #[test]
@@ -1172,58 +1169,9 @@ mod tests {
             assert_eq!(cart2.map[i], cart.map[i], "map tile {}", i);
         }
 
-        // SFX
-        for s in 0..NUM_SFX {
-            assert_eq!(cart2.sfx[s].speed, cart.sfx[s].speed, "sfx {} speed", s);
-            assert_eq!(
-                cart2.sfx[s].loop_start, cart.sfx[s].loop_start,
-                "sfx {} loop_start",
-                s
-            );
-            assert_eq!(
-                cart2.sfx[s].loop_end, cart.sfx[s].loop_end,
-                "sfx {} loop_end",
-                s
-            );
-            for n in 0..NOTES_PER_SFX {
-                assert_eq!(
-                    cart2.sfx[s].notes[n].pitch, cart.sfx[s].notes[n].pitch,
-                    "sfx {} note {} pitch",
-                    s, n
-                );
-                assert_eq!(
-                    cart2.sfx[s].notes[n].waveform, cart.sfx[s].notes[n].waveform,
-                    "sfx {} note {} waveform",
-                    s, n
-                );
-                assert_eq!(
-                    cart2.sfx[s].notes[n].volume, cart.sfx[s].notes[n].volume,
-                    "sfx {} note {} volume",
-                    s, n
-                );
-                assert_eq!(
-                    cart2.sfx[s].notes[n].effect, cart.sfx[s].notes[n].effect,
-                    "sfx {} note {} effect",
-                    s, n
-                );
-            }
-        }
-
-        // Music
-        for m in 0..NUM_MUSIC {
-            assert_eq!(
-                cart2.music[m].flags, cart.music[m].flags,
-                "music {} flags",
-                m
-            );
-            for ch in 0..4 {
-                assert_eq!(
-                    cart2.music[m].channels[ch], cart.music[m].channels[ch],
-                    "music {} channel {}",
-                    m, ch
-                );
-            }
-        }
+        assert_eq!(cart2.sfx, cart.sfx);
+        assert_eq!(cart2.music, cart.music);
+        assert!(cart2 == cart);
     }
 
     #[test]
@@ -1254,6 +1202,61 @@ mod tests {
         assert_eq!(
             text1, text2,
             "double round-trip should produce identical output"
+        );
+    }
+    #[test]
+    fn test_map_rows_32_to_63_mirror_upper_sprite_sheet() {
+        // 32-row __map__ (PICO-8 default): lower map comes from gfx rows 64+.
+        let mut gfx = String::new();
+        for y in 0..128 {
+            let line = if y == 64 {
+                "12".repeat(64)
+            } else {
+                "0".repeat(128)
+            };
+            gfx.push_str(&line);
+            gfx.push('\n');
+        }
+        let src = format!(
+            "pico-8 cartridge\nversion 42\n__gfx__\n{}__map__\n{}",
+            gfx,
+            format!("{}\n", "0".repeat(256)).repeat(32)
+        );
+        let cart = parse_cart(&src);
+        // pixel(0)=1 (left, low nibble), pixel(1)=2 (right, high nibble).
+        // Sheet row 64 (128 px) covers map row 32 tiles 0..63; tiles 64..127
+        // come from sheet row 65, which is blank here.
+        assert_eq!(cart.map[32 * 128], 0x21);
+        assert_eq!(cart.map[32 * 128 + 63], 0x21);
+        assert_eq!(cart.map[32 * 128 + 64], 0);
+        assert_eq!(cart.map[33 * 128], 0);
+        assert_eq!(cart.map[31 * 128], 0);
+    }
+
+    #[test]
+    fn test_map_with_64_rows_keeps_explicit_lower_rows() {
+        let mut gfx = String::new();
+        for _ in 0..128 {
+            gfx.push_str(&"f".repeat(128));
+            gfx.push('\n');
+        }
+        let mut map = String::new();
+        for y in 0..64 {
+            let line = if y == 40 {
+                format!("ab{}", "0".repeat(254))
+            } else {
+                "0".repeat(256)
+            };
+            map.push_str(&line);
+            map.push('\n');
+        }
+        let src = format!("pico-8 cartridge\n__gfx__\n{}__map__\n{}", gfx, map);
+        let cart = parse_cart(&src);
+        assert_eq!(cart.map[40 * 128], 0xAB);
+        assert_eq!(
+            cart.map[32 * 128],
+            0,
+            "explicit rows must not be overwritten"
         );
     }
 }
