@@ -7,3 +7,6 @@
 *.spark.png
 screenshot_*.png
 label.png
+
+# Third-party BBS cart used by tests/real_cart.rs; kept local, not redistributed
+spark-desktop/tests/fixtures/real_cart.p8.png
